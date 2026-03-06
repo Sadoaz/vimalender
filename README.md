@@ -16,7 +16,7 @@ https://github.com/user-attachments/assets/94059b5d-a0d2-4968-9b54-b7d608e4a526
 Requires Go 1.25+. Installs the binary to your `$GOPATH/bin` (or `$GOBIN`):
 
 ```sh
-go install github.com/william/vimalender@latest
+go install github.com/Sadoaz/vimalender@latest
 ```
 
 Make sure `$GOPATH/bin` is in your `PATH`, then run:
@@ -28,7 +28,7 @@ vimalender
 ### From source
 
 ```sh
-git clone https://github.com/william/vimalender.git
+git clone https://github.com/Sadoaz/vimalender.git
 cd vimalender
 go build -o vimalender .
 ./vimalender

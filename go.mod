@@ -1,4 +1,4 @@
-module github.com/william/vimalender
+module github.com/Sadoaz/vimalender
 
 go 1.25.0
 

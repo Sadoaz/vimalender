@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/Sadoaz/vimalender/internal"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/william/vimalender/internal"
 )
 
 func main() {
