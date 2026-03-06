@@ -9,7 +9,7 @@ https://github.com/user-attachments/assets/94059b5d-a0d2-4968-9b54-b7d608e4a526
 
 
 
-## Installationa
+## Installation
 
 ### go install
 
@@ -20,6 +20,14 @@ go install github.com/Sadoaz/vimalender@latest
 ```
 
 Make sure `$GOPATH/bin` is in your `PATH`, then run:
+
+```sh
+# bash/zsh
+export PATH="$HOME/go/bin:$PATH"
+
+# fish
+fish_add_path ~/go/bin
+```
 
 ```sh
 vimalender
@@ -176,7 +184,6 @@ Open with `S`. Navigate with `j`/`k`, change values with `h`/`l` or `Enter`.
 | Day start hour | 8 | Hour the grid starts at (0-23) |
 | Day count | 7 | Number of day columns (1-9) |
 | Jump step | 5% | Cursor step as % of viewport (2-25%) |
-| Zoom level | Auto | Minutes per row. Auto fits day-start to midnight. |
 | Show keybinding hints | On | Show hints in the status bar |
 | Show event borders | On | Left color bar style vs full background |
 | Show descriptions | On | Show event descriptions below title in grid |
@@ -186,8 +193,6 @@ Open with `S`. Navigate with `j`/`k`, change values with `h`/`l` or `Enter`.
 ## Zoom Levels
 
 Zoom steps through clean divisors of 60: `1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30, 60` minutes per row.
-
-**Auto zoom** (default) fits the visible day from the configured start hour to midnight into the available terminal height.
 
 ## Data Storage
 
