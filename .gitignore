@@ -1,0 +1,20 @@
+# Compiled binary
+vimalender
+openspec/
+# AI tool configs
+.claude/
+.codex/
+.opencode/
+
+# Node modules
+node_modules/
+
+# OS and editor files
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Environment files
+.env
+.env.*
