@@ -208,6 +208,4 @@ Press `e` on any event to open it in `$EDITOR` (or `vi`). The editor shows a str
 - Minimum terminal size: 80x24
 - Go 1.25+ (build only)
 
-## License
 
-MIT
