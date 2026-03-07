@@ -24,7 +24,7 @@ const (
 	KeyShiftM = "M"
 	KeyShiftY = "Y" // year view
 	KeyShiftS = "S" // open settings menu
-	KeyC      = "c" // jump to today
+	KeyC      = "c" // center on current time (now-line)
 	KeyG      = "g"
 	KeyShiftG = "G" // jump to day of month with count prefix
 	KeySlash  = "/"
@@ -36,6 +36,8 @@ const (
 	KeyTab    = "tab"    // cycle overlapping events
 	KeyS      = "s"      // edit menu in adjust mode
 	KeyU      = "u"      // undo
+	KeyCtrlD  = "ctrl+d" // half page down
+	KeyCtrlU  = "ctrl+u" // half page up
 	KeyCtrlP  = "ctrl+p" // previous search match
 	KeyCtrlN  = "ctrl+n" // next search match
 	KeyCtrlR  = "ctrl+r" // redo

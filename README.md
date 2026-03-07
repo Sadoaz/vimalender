@@ -60,16 +60,15 @@ Press `Enter` in month or year view to open the week view at the selected day.
 
 | Key | Action |
 |-----|--------|
-| `h` / `l` | Move cursor one day left / right |
-| `j` / `k` | Move cursor down / up by jump step (configurable % of viewport) |
+| `h` / `l` | Move between overlapping events, or previous / next day |
+| `j` / `k` | Move cursor down / up |
 | `J` / `K` | Move cursor down / up by exactly 1 minute |
-| `H` / `L` | Select previous / next overlapping event in sub-columns |
+| `Ctrl+D` / `Ctrl+U` | Jump quarter page down / up |
 | `Tab` | Cycle through overlapping events at cursor |
 | `1`-`9` | Set number of visible day columns |
-| `c` | Jump to today (today on far left) |
+| `c` | Jump to now (today on far left, cursor at current time) |
 | `g` | Go to time -- type e.g. `14:30`, `1430`, `9` and press Enter |
 | `G` | Go to day -- type day of month (1-31) and press Enter |
-| `+` / `-` | Zoom in / out (minutes per row) |
 | `M` | Switch to month view |
 | `Y` | Switch to year view |
 | `S` | Open settings menu |
@@ -110,7 +109,7 @@ For recurring events, delete prompts: **(o)ne** occurrence or **(a)ll**.
 | `Ctrl+N` / `Ctrl+P` | Alternative next / previous match |
 | `Esc` | Clear search highlights |
 
-Search matches against both event title and description. Matches are highlighted in the grid, and you can cycle through them with `n`/`N`.
+Search matches against event title and description. For recurring events, search finds the base event and highlights all its occurrences. Navigate matches with `n`/`N`.
 
 ### Adjust Mode
 
@@ -173,7 +172,7 @@ Recurring events can have an optional end date. Virtual occurrences are shown wi
 
 ## Overlapping Events
 
-Events can overlap in time. Overlapping events are displayed side-by-side in sub-columns within the same day. Use `H`/`L` or `Tab` to navigate between them. The status bar shows `[N/M: title]` to indicate which overlapping event is selected.
+Events can overlap in time. Overlapping events are displayed side-by-side in sub-columns within the same day. Use `h`/`l` or `Tab` to navigate between them. When scrolling with `j`/`k`, the cursor automatically selects new events as they appear. The status bar shows `[N/M: title]` to indicate which overlapping event is selected.
 
 ## Settings
 
@@ -181,18 +180,12 @@ Open with `S`. Navigate with `j`/`k`, change values with `h`/`l` or `Enter`.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Day start hour | 8 | Hour the grid starts at (0-23) |
 | Day count | 7 | Number of day columns (1-9) |
-| Jump step | 5% | Cursor step as % of viewport (2-25%) |
 | Show keybinding hints | On | Show hints in the status bar |
 | Show event borders | On | Left color bar style vs full background |
 | Show descriptions | On | Show event descriptions below title in grid |
 | Quick create | Off | Skip recurrence picker during create |
 | Skip description | Off | Skip description step during create |
-
-## Zoom Levels
-
-Zoom steps through clean divisors of 60: `1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30, 60` minutes per row.
 
 ## Data Storage
 

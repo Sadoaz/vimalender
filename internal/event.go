@@ -419,6 +419,24 @@ func (s *EventStore) EventsAtMinute(date time.Time, minute int) []int {
 	return indices
 }
 
+// VisualEventsAtMinute returns event indices at the given minute, respecting
+// the visual gap at the bottom of multi-row events. This prevents selecting
+// events on their gap row.
+func (s *EventStore) VisualEventsAtMinute(date time.Time, minute, mpr int) []int {
+	events := s.GetByDate(date)
+	var indices []int
+	for i, ev := range events {
+		visualEnd := ev.EndMin
+		if ev.EndMin-ev.StartMin > mpr {
+			visualEnd -= mpr
+		}
+		if minute >= ev.StartMin && minute < visualEnd {
+			indices = append(indices, i)
+		}
+	}
+	return indices
+}
+
 // OverlapColumns computes how many columns are needed for overlapping events
 // in a given minute range, and assigns each event a column index.
 // Returns a map from event index to (column, totalColumns).
@@ -475,7 +493,13 @@ func (s *EventStore) LayoutEvents(date time.Time, pinnedID string, pinnedCol int
 		layout[pinnedIdx] = EventLayout{Col: pinnedCol}
 	}
 
-	// Greedy placement for all other events
+	// Greedy placement for all other events.
+	// columns[] stores the "visual occupy until" time for each column.
+	// Multi-row events (> 30 min) already have a rendering gap (last row
+	// removed), so their visual end is endMin - 30 and the next row is free.
+	// Short events (≤ 30 min) have no rendering gap, so we add 30 min
+	// to prevent the next event from being glued to them visually.
+	const mpr = 30 // must match MinutesPerRow
 	for _, idx := range indices {
 		if idx == pinnedIdx {
 			continue
@@ -484,7 +508,14 @@ func (s *EventStore) LayoutEvents(date time.Time, pinnedID string, pinnedCol int
 		placed := false
 		for c := range columns {
 			if columns[c] <= ev.StartMin {
-				columns[c] = ev.EndMin
+				// Store the visual occupy-until time
+				if ev.EndMin-ev.StartMin > mpr {
+					// Multi-row: rendering gap already provides spacing
+					columns[c] = ev.EndMin
+				} else {
+					// Short event: add explicit gap
+					columns[c] = ev.EndMin + mpr
+				}
 				layout[idx] = EventLayout{Col: c}
 				placed = true
 				break
@@ -492,12 +523,22 @@ func (s *EventStore) LayoutEvents(date time.Time, pinnedID string, pinnedCol int
 		}
 		if !placed {
 			layout[idx] = EventLayout{Col: len(columns)}
-			columns = append(columns, ev.EndMin)
+			if ev.EndMin-ev.StartMin > mpr {
+				columns = append(columns, ev.EndMin)
+			} else {
+				columns = append(columns, ev.EndMin+mpr)
+			}
 		}
 	}
 
-	// Find connected overlap groups using union-find approach.
-	// Two events are in the same group if they overlap in time.
+	// Compute TotalCol using visual-row grouping.
+	// For each "visual row" (every mpr-minute slot), find all events that
+	// occupy that row (including gap rows for short events). All events
+	// sharing any visual row are grouped together via union-find, and the
+	// group's TotalCol = max(Col+1) across members.
+	//
+	// This handles real overlaps, gap-adjacent events, and mixed cases
+	// uniformly without special-case post-passes.
 	parent := make(map[int]int)
 	for _, idx := range indices {
 		parent[idx] = idx
@@ -516,34 +557,54 @@ func (s *EventStore) LayoutEvents(date time.Time, pinnedID string, pinnedCol int
 		}
 	}
 
-	// Union all overlapping pairs
+	// Compute each event's visual occupy range (matching greedy placement).
+	type visualRange struct {
+		start, end int
+	}
+	vr := make(map[int]visualRange)
+	for _, idx := range indices {
+		ev := events[idx]
+		vEnd := ev.EndMin
+		if ev.EndMin-ev.StartMin <= mpr {
+			vEnd = ev.EndMin + mpr // short events get gap
+		}
+		vr[idx] = visualRange{ev.StartMin, vEnd}
+	}
+
+	// Union events whose visual ranges overlap.
 	for i := 0; i < len(indices); i++ {
 		for j := i + 1; j < len(indices); j++ {
 			a, b := indices[i], indices[j]
-			ea, eb := events[a], events[b]
-			if ea.StartMin < eb.EndMin && ea.EndMin > eb.StartMin {
+			va, vb := vr[a], vr[b]
+			if va.start < vb.end && va.end > vb.start {
 				union(a, b)
 			}
 		}
 	}
 
-	// For each group, find the max column count (max Col + 1)
+	// For each group, find max Col+1.
 	groupMaxCol := make(map[int]int)
+	groupMembers := make(map[int]int)
 	for _, idx := range indices {
 		root := find(idx)
+		groupMembers[root]++
 		col := layout[idx].Col + 1
 		if col > groupMaxCol[root] {
 			groupMaxCol[root] = col
 		}
 	}
 
-	// Set TotalCol for all events in each group
+	// Set TotalCol. Singletons at Col=0 get full width.
 	for _, idx := range indices {
 		root := find(idx)
 		l := layout[idx]
-		l.TotalCol = groupMaxCol[root]
-		if l.TotalCol < 1 {
+		if groupMembers[root] == 1 && l.Col == 0 {
 			l.TotalCol = 1
+		} else {
+			l.TotalCol = groupMaxCol[root]
+			if l.TotalCol < 1 {
+				l.TotalCol = 1
+			}
 		}
 		layout[idx] = l
 	}

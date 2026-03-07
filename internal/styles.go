@@ -159,4 +159,13 @@ var (
 				Background(lipgloss.Color("70")).
 				Foreground(lipgloss.Color("255")).
 				Padding(0, 1)
+
+	// Current time line — red marker for "now" in the time gutter
+	NowGutterStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#ff0000")).
+			Bold(true)
+
+	// Current time line — red line across the day column for today
+	NowLineStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#ff0000"))
 )

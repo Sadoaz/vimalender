@@ -2,6 +2,7 @@ package internal
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -125,6 +126,9 @@ func (m Model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // updateSearchMatches recalculates matches for the current query.
+// Only base (stored) events are searched — virtual occurrences of recurring
+// events are not expanded, so each recurring event appears as a single match
+// on its original date.
 func (m *Model) updateSearchMatches() {
 	m.searchMatches = nil
 	if m.searchQuery == "" {
@@ -132,19 +136,7 @@ func (m *Model) updateSearchMatches() {
 	}
 	query := strings.ToLower(m.searchQuery)
 
-	// Collect all dates that have stored events
-	seen := make(map[time.Time]bool)
-	for date := range m.store.AllEvents() {
-		seen[date] = true
-	}
-	// Also include visible dates so virtual occurrences in view are found
-	for col := 0; col < m.dayCount; col++ {
-		d := DateKey(m.windowStart.AddDate(0, 0, col))
-		seen[d] = true
-	}
-
-	for date := range seen {
-		events := m.store.GetByDate(date)
+	for date, events := range m.store.AllEvents() {
 		for i, ev := range events {
 			if strings.Contains(strings.ToLower(ev.Title), query) ||
 				strings.Contains(strings.ToLower(ev.Desc), query) {
@@ -152,6 +144,14 @@ func (m *Model) updateSearchMatches() {
 			}
 		}
 	}
+
+	// Sort matches by date then index for deterministic navigation order
+	sort.Slice(m.searchMatches, func(i, j int) bool {
+		if m.searchMatches[i].Date.Equal(m.searchMatches[j].Date) {
+			return m.searchMatches[i].Index < m.searchMatches[j].Index
+		}
+		return m.searchMatches[i].Date.Before(m.searchMatches[j].Date)
+	})
 }
 
 // jumpToMatch navigates to the search match at the given index.

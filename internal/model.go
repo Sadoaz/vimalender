@@ -141,6 +141,10 @@ func NewModel() Model {
 		errMsg = settingsErr
 	}
 
+	// Force DayStartHour to 0 (always show full day from midnight)
+	settings.DayStartHour = 0
+	settings.RoundBorders = false
+
 	// Restore persisted position, or default to today
 	windowStart := today
 	cursorCol := 0
@@ -163,7 +167,7 @@ func NewModel() Model {
 		cursorMin:          cursorMin,
 		viewportOffset:     viewportOffset,
 		store:              store,
-		zoomLevel:          settings.ZoomLevel,
+		zoomLevel:          ZoomAuto,
 		dayCount:           settings.DayCount,
 		settings:           settings,
 		adjustIndex:        -1,
@@ -179,11 +183,12 @@ func (m *Model) SelectedDate() time.Time {
 }
 
 // selectedEventIndex returns the event index under cursor, respecting overlap selection.
+// Uses visual bounds (excluding gap row) so the gap between events is not selectable.
 // Returns -1 if no event at cursor.
 func (m *Model) selectedEventIndex() int {
 	date := m.SelectedDate()
 	events := m.store.GetByDate(date)
-	indices := m.store.EventsAtMinute(date, m.cursorMin)
+	indices := m.store.VisualEventsAtMinute(date, m.cursorMin, m.MinutesPerRow())
 	if len(indices) == 0 {
 		return -1
 	}
@@ -204,25 +209,120 @@ func (m *Model) resetOverlapIndex() {
 	m.selectedOverlapEvt = ""
 }
 
-// sortedOverlapIndices returns event indices at the cursor minute, sorted by
-// their visual layout column so H/L navigation follows left-to-right order.
-func (m *Model) sortedOverlapIndices(date time.Time, minute int) []int {
-	indices := m.store.EventsAtMinute(date, minute)
-	if len(indices) <= 1 {
-		return indices
+// autoSelectOverlapEvent picks the best event to highlight at the current
+// cursor position after j/k movement. If an event starts on this row it gets
+// priority (so scrolling "enters" new events naturally). Otherwise the
+// currently selected event is kept if it still covers this row.
+func (m *Model) autoSelectOverlapEvent() {
+	date := m.SelectedDate()
+	events := m.store.GetByDate(date)
+	indices := m.store.VisualEventsAtMinute(date, m.cursorMin, m.MinutesPerRow())
+	if len(indices) == 0 {
+		return
 	}
-	layout := m.store.LayoutEvents(date, "", 0)
-	sort.Slice(indices, func(a, b int) bool {
-		la, lb := EventLayout{}, EventLayout{}
-		if layout != nil {
-			if l, ok := layout[indices[a]]; ok {
-				la = l
-			}
-			if l, ok := layout[indices[b]]; ok {
-				lb = l
+
+	mpr := m.MinutesPerRow()
+	rowStart := (m.cursorMin / mpr) * mpr
+	rowEnd := rowStart + mpr
+
+	// Check if any event starts on this row — if so, prefer it
+	for _, idx := range indices {
+		ev := events[idx]
+		if ev.StartMin >= rowStart && ev.StartMin < rowEnd {
+			m.selectedOverlapEvt = ev.ID
+			return
+		}
+	}
+
+	// Keep current selection if it still covers this row
+	if m.selectedOverlapEvt != "" {
+		for _, idx := range indices {
+			if events[idx].ID == m.selectedOverlapEvt {
+				return
 			}
 		}
-		return la.Col < lb.Col
+	}
+
+	// Fall back to first event at this minute
+	m.selectedOverlapEvt = events[indices[0]].ID
+}
+
+// sortedOverlapIndices returns all event indices in the same overlap group
+// as the event under the cursor, sorted by their visual layout column
+// so H/L navigation follows left-to-right order.
+// This uses LayoutEvents' TotalCol: events sharing the same TotalCol > 1
+// and belonging to the same connected overlap group are returned together,
+// regardless of whether they all overlap the exact cursor minute.
+func (m *Model) sortedOverlapIndices(date time.Time, minute int) []int {
+	events := m.store.GetByDate(date)
+	layout := m.store.LayoutEvents(date, "", 0)
+	if layout == nil {
+		return m.store.EventsAtMinute(date, minute)
+	}
+
+	// Find which event is currently selected or under cursor (visual bounds)
+	cursorIndices := m.store.VisualEventsAtMinute(date, minute, m.MinutesPerRow())
+	if len(cursorIndices) == 0 {
+		return nil
+	}
+
+	// Pick the selected event (by ID) or fall back to first at cursor
+	seedIdx := cursorIndices[0]
+	if m.selectedOverlapEvt != "" {
+		for _, idx := range cursorIndices {
+			if idx < len(events) && events[idx].ID == m.selectedOverlapEvt {
+				seedIdx = idx
+				break
+			}
+		}
+	}
+
+	seedLayout, ok := layout[seedIdx]
+	if !ok || seedLayout.TotalCol <= 1 {
+		return cursorIndices
+	}
+
+	// Collect all events in the same overlap group.
+	// Two events are in the same group if they share a TotalCol value AND
+	// are transitively connected through overlapping time ranges.
+	// We do a simple flood-fill: start from seedIdx, find all events that
+	// overlap any event already in the group.
+	inGroup := map[int]bool{seedIdx: true}
+	changed := true
+	for changed {
+		changed = false
+		for idx, l := range layout {
+			if inGroup[idx] {
+				continue
+			}
+			if l.TotalCol != seedLayout.TotalCol {
+				continue
+			}
+			// Check if this event overlaps any event already in the group
+			ev := events[idx]
+			for gIdx := range inGroup {
+				gev := events[gIdx]
+				if ev.StartMin < gev.EndMin && ev.EndMin > gev.StartMin {
+					inGroup[idx] = true
+					changed = true
+					break
+				}
+			}
+		}
+	}
+
+	var indices []int
+	for idx := range inGroup {
+		indices = append(indices, idx)
+	}
+
+	// Sort by start time so navigation goes sequentially down the day
+	sort.Slice(indices, func(a, b int) bool {
+		ea, eb := events[indices[a]], events[indices[b]]
+		if ea.StartMin != eb.StartMin {
+			return ea.StartMin < eb.StartMin
+		}
+		return ea.ID < eb.ID
 	})
 	return indices
 }
@@ -328,34 +428,10 @@ func (m Model) handleEditorResult(msg editorResultMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// MinutesPerRow calculates how many minutes each display row represents.
-// If zoomLevel is set, uses that value. Otherwise auto-fits the visible day
-// portion (from DayStartHour to midnight).
-// cleanMprValues are the "clean" minutes-per-row values that produce even time labels.
-// Each is a divisor of 60, so time labels always land on :00, :05, :10, :15, etc.
-var cleanMprValues = []int{1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30, 60}
-
+// MinutesPerRow returns the fixed minutes-per-row value (30).
+// This gives 2 rows per hour with clean time labels.
 func (m *Model) MinutesPerRow() int {
-	if m.zoomLevel != ZoomAuto {
-		return m.zoomLevel
-	}
-	vpHeight := m.viewportHeight()
-	if vpHeight <= 0 {
-		return 30
-	}
-	visibleMinutes := MinutesPerDay - m.dayStartMin()
-	// Need mpr such that ceil(visibleMinutes/mpr) <= vpHeight
-	minMpr := (visibleMinutes + vpHeight - 1) / vpHeight
-	if minMpr < 1 {
-		minMpr = 1
-	}
-	// Snap to the smallest clean value >= minMpr (so the visible day fits)
-	for _, v := range cleanMprValues {
-		if v >= minMpr {
-			return v
-		}
-	}
-	return 60
+	return 30
 }
 
 // dayStartMin returns the start-of-day minute offset from the DayStartHour setting.
@@ -372,6 +448,7 @@ func (m Model) Init() tea.Cmd {
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		firstResize := m.width == 0 && m.height == 0
 		m.width = msg.Width
 		m.height = msg.Height
 		// If current zoom level is too coarse for the new size, switch to auto
@@ -385,6 +462,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.zoomLevel > maxMpr {
 				m.zoomLevel = ZoomAuto
 			}
+		}
+		// On first resize (app startup), center viewport on current time
+		if firstResize {
+			now := time.Now()
+			nowMin := now.Hour()*60 + now.Minute()
+			mpr := m.MinutesPerRow()
+			m.cursorMin = (nowMin / mpr) * mpr
+			// Place today's column under cursor if visible
+			todayDate := DateKey(now)
+			for i := 0; i < m.dayCount; i++ {
+				if DateKey(m.windowStart.AddDate(0, 0, i)).Equal(todayDate) {
+					m.cursorCol = i
+					break
+				}
+			}
+			m.centerViewportOnCursor()
 		}
 		return m, nil
 
@@ -440,7 +533,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) viewportHeight() int {
-	h := m.height - 4
+	h := m.height - 3 // 1 header + 1 newline + 1 status bar
 	if h < 1 {
 		h = 1
 	}
@@ -449,10 +542,6 @@ func (m *Model) viewportHeight() int {
 
 // centerViewportOnCursor adjusts viewport offset to center the cursor vertically.
 func (m *Model) centerViewportOnCursor() {
-	if m.zoomLevel == ZoomAuto {
-		m.viewportOffset = m.dayStartMin()
-		return
-	}
 	mpr := m.MinutesPerRow()
 	vpHeight := m.viewportHeight()
 	// Place cursor in the middle of the viewport
@@ -460,7 +549,14 @@ func (m *Model) centerViewportOnCursor() {
 	if m.viewportOffset < 0 {
 		m.viewportOffset = 0
 	}
-	// Don't clamp to maxOffset — allow filler rows past end of day
+	// Clamp to max offset
+	maxOffset := MinutesPerDay - mpr*vpHeight
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if m.viewportOffset > maxOffset {
+		m.viewportOffset = maxOffset
+	}
 }
 
 // zoomIn decreases minutes-per-row (more detail).
@@ -526,24 +622,15 @@ func (m *Model) autoMpr() int {
 		return 30
 	}
 	visibleMinutes := MinutesPerDay - m.dayStartMin()
-	minMpr := (visibleMinutes + vpHeight - 1) / vpHeight
-	if minMpr < 1 {
-		minMpr = 1
+	mpr := (visibleMinutes + vpHeight - 1) / vpHeight
+	if mpr < 1 {
+		mpr = 1
 	}
-	for _, v := range cleanMprValues {
-		if v >= minMpr {
-			return v
-		}
-	}
-	return 60
+	return mpr
 }
 
 // ensureCursorVisible adjusts viewport offset so the cursor is visible.
 func (m *Model) ensureCursorVisible() {
-	if m.zoomLevel == ZoomAuto {
-		m.viewportOffset = m.dayStartMin()
-		return
-	}
 	mpr := m.MinutesPerRow()
 	vpHeight := m.viewportHeight()
 	vpEnd := m.viewportOffset + mpr*vpHeight
@@ -569,9 +656,6 @@ func (m *Model) ensureCursorVisible() {
 
 // ensureCreateVisible adjusts viewport so the create preview end is visible.
 func (m *Model) ensureCreateVisible() {
-	if m.zoomLevel == ZoomAuto {
-		return
-	}
 	mpr := m.MinutesPerRow()
 	vpHeight := m.viewportHeight()
 	vpEnd := m.viewportOffset + mpr*vpHeight
@@ -604,14 +688,14 @@ func (m *Model) maxDayCount() int {
 	return maxCols
 }
 
-// jumpStep returns the number of minutes per j/k press based on viewport percent.
+// jumpStep returns the number of minutes per j/k press (2% of viewport).
 // The step is rounded to the nearest multiple of MinutesPerRow so the cursor
 // always lands on a grid-line (clean time like :00, :05, :15, :30).
 func (m *Model) jumpStep() int {
 	mpr := m.MinutesPerRow()
 	vpHeight := m.viewportHeight()
 	totalVisible := mpr * vpHeight
-	step := totalVisible * m.settings.JumpPercent / 100
+	step := totalVisible * 2 / 100
 	if step < mpr {
 		step = mpr
 	}
@@ -676,20 +760,88 @@ func (m Model) updateNavigate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case IsKey(msg, KeyH):
-		if m.cursorCol > 0 {
-			m.cursorCol--
+		// If overlapping events exist, navigate to previous event in group;
+		// otherwise move to the previous day column.
+		date := m.SelectedDate()
+		indices := m.sortedOverlapIndices(date, m.cursorMin)
+		if len(indices) > 1 {
+			events := m.store.GetByDate(date)
+			pos := 0
+			for i, idx := range indices {
+				if idx < len(events) && events[idx].ID == m.selectedOverlapEvt {
+					pos = i
+					break
+				}
+			}
+			pos--
+			if pos < 0 {
+				// Already at first event in group → move to previous day
+				if m.cursorCol > 0 {
+					m.cursorCol--
+				} else {
+					m.windowStart = m.windowStart.AddDate(0, 0, -1)
+				}
+				m.resetOverlapIndex()
+			} else {
+				selIdx := indices[pos]
+				if selIdx < len(events) {
+					m.selectedOverlapEvt = events[selIdx].ID
+					mpr := m.MinutesPerRow()
+					m.cursorMin = (events[selIdx].StartMin / mpr) * mpr
+					m.ensureCursorVisible()
+					m.statusMsg = fmt.Sprintf("[%d/%d] %s", pos+1, len(indices), events[selIdx].Title)
+				}
+			}
 		} else {
-			m.windowStart = m.windowStart.AddDate(0, 0, -1)
+			if m.cursorCol > 0 {
+				m.cursorCol--
+			} else {
+				m.windowStart = m.windowStart.AddDate(0, 0, -1)
+			}
+			m.resetOverlapIndex()
 		}
-		m.resetOverlapIndex()
 
 	case IsKey(msg, KeyL):
-		if m.cursorCol < m.dayCount-1 {
-			m.cursorCol++
+		// If overlapping events exist, navigate to next event in group;
+		// otherwise move to the next day column.
+		date := m.SelectedDate()
+		indices := m.sortedOverlapIndices(date, m.cursorMin)
+		if len(indices) > 1 {
+			events := m.store.GetByDate(date)
+			pos := 0
+			for i, idx := range indices {
+				if idx < len(events) && events[idx].ID == m.selectedOverlapEvt {
+					pos = i
+					break
+				}
+			}
+			pos++
+			if pos >= len(indices) {
+				// Already at last event in group → move to next day
+				if m.cursorCol < m.dayCount-1 {
+					m.cursorCol++
+				} else {
+					m.windowStart = m.windowStart.AddDate(0, 0, 1)
+				}
+				m.resetOverlapIndex()
+			} else {
+				selIdx := indices[pos]
+				if selIdx < len(events) {
+					m.selectedOverlapEvt = events[selIdx].ID
+					mpr := m.MinutesPerRow()
+					m.cursorMin = (events[selIdx].StartMin / mpr) * mpr
+					m.ensureCursorVisible()
+					m.statusMsg = fmt.Sprintf("[%d/%d] %s", pos+1, len(indices), events[selIdx].Title)
+				}
+			}
 		} else {
-			m.windowStart = m.windowStart.AddDate(0, 0, 1)
+			if m.cursorCol < m.dayCount-1 {
+				m.cursorCol++
+			} else {
+				m.windowStart = m.windowStart.AddDate(0, 0, 1)
+			}
+			m.resetOverlapIndex()
 		}
-		m.resetOverlapIndex()
 
 	case IsKey(msg, KeyJ):
 		step := m.jumpStep()
@@ -710,6 +862,7 @@ func (m Model) updateNavigate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cursorMin = (m.cursorMin / mpr) * mpr
 		}
 		m.ensureCursorVisible()
+		m.autoSelectOverlapEvent()
 
 	case IsKey(msg, KeyK):
 		step := m.jumpStep()
@@ -731,6 +884,42 @@ func (m Model) updateNavigate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cursorMin = (m.cursorMin / mpr) * mpr
 		}
 		m.ensureCursorVisible()
+		m.autoSelectOverlapEvent()
+
+	case IsKey(msg, KeyCtrlD):
+		// Quarter page down, wrap to next day
+		mpr := m.MinutesPerRow()
+		quarterPage := mpr * (m.viewportHeight() / 4)
+		m.cursorMin += quarterPage
+		if m.cursorMin >= MinutesPerDay {
+			if m.cursorCol < m.dayCount-1 {
+				m.cursorCol++
+			} else {
+				m.windowStart = m.windowStart.AddDate(0, 0, 1)
+			}
+			m.cursorMin = m.dayStartMin()
+			m.viewportOffset = m.dayStartMin()
+			m.resetOverlapIndex()
+		}
+		m.ensureCursorVisible()
+		m.autoSelectOverlapEvent()
+
+	case IsKey(msg, KeyCtrlU):
+		// Quarter page up, wrap to previous day
+		mpr := m.MinutesPerRow()
+		quarterPage := mpr * (m.viewportHeight() / 4)
+		m.cursorMin -= quarterPage
+		if m.cursorMin < 0 {
+			if m.cursorCol > 0 {
+				m.cursorCol--
+			} else {
+				m.windowStart = m.windowStart.AddDate(0, 0, -1)
+			}
+			m.cursorMin = ((MinutesPerDay - 1) / mpr) * mpr
+			m.resetOverlapIndex()
+		}
+		m.ensureCursorVisible()
+		m.autoSelectOverlapEvent()
 
 	case IsKey(msg, KeyShiftJ):
 		m.cursorMin++
@@ -762,12 +951,11 @@ func (m Model) updateNavigate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ensureCursorVisible()
 
 	case IsKey(msg, KeyTab):
-		// Cycle through overlapping events at cursor position (forward)
+		// Cycle through overlapping events (forward), moving cursor to each
 		date := m.SelectedDate()
 		events := m.store.GetByDate(date)
 		indices := m.sortedOverlapIndices(date, m.cursorMin)
 		if len(indices) > 1 {
-			// Find current position in the overlap list by event ID
 			pos := 0
 			for i, idx := range indices {
 				if idx < len(events) && events[idx].ID == m.selectedOverlapEvt {
@@ -779,12 +967,15 @@ func (m Model) updateNavigate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			selIdx := indices[pos]
 			if selIdx < len(events) {
 				m.selectedOverlapEvt = events[selIdx].ID
+				mpr := m.MinutesPerRow()
+				m.cursorMin = (events[selIdx].StartMin / mpr) * mpr
+				m.ensureCursorVisible()
 				m.statusMsg = fmt.Sprintf("[%d/%d] %s", pos+1, len(indices), events[selIdx].Title)
 			}
 		}
 
 	case IsKey(msg, KeyShiftL):
-		// Move to next overlapping event (right in sub-columns)
+		// Move to next overlapping event, moving cursor to it
 		date := m.SelectedDate()
 		events := m.store.GetByDate(date)
 		indices := m.sortedOverlapIndices(date, m.cursorMin)
@@ -800,12 +991,15 @@ func (m Model) updateNavigate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			selIdx := indices[pos]
 			if selIdx < len(events) {
 				m.selectedOverlapEvt = events[selIdx].ID
+				mpr := m.MinutesPerRow()
+				m.cursorMin = (events[selIdx].StartMin / mpr) * mpr
+				m.ensureCursorVisible()
 				m.statusMsg = fmt.Sprintf("[%d/%d] %s", pos+1, len(indices), events[selIdx].Title)
 			}
 		}
 
 	case IsKey(msg, KeyShiftH):
-		// Move to previous overlapping event (left in sub-columns)
+		// Move to previous overlapping event, moving cursor to it
 		date := m.SelectedDate()
 		events := m.store.GetByDate(date)
 		indices := m.sortedOverlapIndices(date, m.cursorMin)
@@ -824,6 +1018,9 @@ func (m Model) updateNavigate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			selIdx := indices[pos]
 			if selIdx < len(events) {
 				m.selectedOverlapEvt = events[selIdx].ID
+				mpr := m.MinutesPerRow()
+				m.cursorMin = (events[selIdx].StartMin / mpr) * mpr
+				m.ensureCursorVisible()
 				m.statusMsg = fmt.Sprintf("[%d/%d] %s", pos+1, len(indices), events[selIdx].Title)
 			}
 		}
@@ -921,14 +1118,10 @@ func (m Model) updateNavigate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case IsKey(msg, KeyPlus):
-		// Zoom in (fewer minutes per row)
-		m.zoomIn()
-		m.saveSettings()
+		// Zoom disabled — always show full day
 
 	case IsKey(msg, KeyMinus):
-		// Zoom out (more minutes per row)
-		m.zoomOut()
-		m.saveSettings()
+		// Zoom disabled — always show full day
 
 	case IsKey(msg, KeySlash):
 		// Enter search mode
@@ -979,13 +1172,13 @@ func (m Model) updateNavigate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case IsKey(msg, KeyC):
-		// Jump to today (today on the far left)
-		today := time.Now()
-		today = time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, today.Location())
-		m.windowStart = today
+		// Jump to now: today on far left, cursor at current time, viewport centered
+		now := time.Now()
+		nowMin := now.Hour()*60 + now.Minute()
+		m.windowStart = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 		m.cursorCol = 0
-		m.viewportOffset = m.dayStartMin()
-		m.cursorMin = m.dayStartMin()
+		m.cursorMin = (nowMin / m.MinutesPerRow()) * m.MinutesPerRow()
+		m.centerViewportOnCursor()
 		m.resetOverlapIndex()
 
 	case IsKey(msg, KeyShiftM):
@@ -1516,10 +1709,6 @@ func (m Model) renderStatusBar() string {
 	switch m.mode {
 	case ModeNavigate:
 		mode = StatusModeStyle.Render(" WEEK ")
-		zoomInfo := ""
-		if m.zoomLevel != ZoomAuto {
-			zoomInfo = fmt.Sprintf(" [%dmin/row]", m.zoomLevel)
-		}
 		searchInfo := ""
 		if m.searchActive {
 			searchInfo = fmt.Sprintf(" /%s [%d/%d]", m.searchQuery, m.searchIndex+1, len(m.searchMatches))
@@ -1542,10 +1731,10 @@ func (m Model) renderStatusBar() string {
 				overlapInfo = fmt.Sprintf("  [%d/%d: %s]", pos+1, len(overlaps), events[selected].Title)
 			}
 		}
-		info := fmt.Sprintf(" %s  %s%s%s%s", date, cursorTime, zoomInfo, searchInfo, overlapInfo)
+		info := fmt.Sprintf(" %s  %s%s%s", date, cursorTime, searchInfo, overlapInfo)
 		if m.settings.ShowHints {
 			hints = StatusHintStyle.Render(info +
-				"  hjkl:nav H/L:overlap a:add e:edit m:move dd:del /:search g:goto +/-:zoom 1-9:cols c:today M:month Y:year S:set q:quit")
+				"  hjkl:nav a:add e:edit m:move dd:del /:search g:goto 1-9:cols c:now ^d/^u:jump M:month Y:year S:set q:quit")
 		} else {
 			hints = StatusHintStyle.Render(info)
 		}

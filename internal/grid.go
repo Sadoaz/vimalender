@@ -83,28 +83,31 @@ func RenderGrid(m *Model) string {
 		createTotalCols = maxExisting + 1
 	}
 
+	// Compute "now" info for current time line
+	now := time.Now()
+	nowMin := now.Hour()*60 + now.Minute()
+	todayDate := DateKey(now)
+	todayCol := -1 // which column (if any) is today
+	for i := 0; i < m.dayCount; i++ {
+		if DateKey(m.windowStart.AddDate(0, 0, i)).Equal(todayDate) {
+			todayCol = i
+			break
+		}
+	}
+
 	// Time rows
 	var rows []string
 	for row := 0; row < vpHeight; row++ {
-		var rowStartMin int
-		if m.zoomLevel == ZoomAuto {
-			rowStartMin = m.dayStartMin() + row*mpr
-		} else {
-			rowStartMin = m.viewportOffset + row*mpr
-		}
+		rowStartMin := m.viewportOffset + row*mpr
 		rowEndMin := rowStartMin + mpr
 		if rowStartMin >= MinutesPerDay {
-			// Past end of day — render empty filler rows
-			gutter := TimeGutterStyle.Render(fmt.Sprintf("%-*s", gutterWidth, ""))
-			empty := fmt.Sprintf("%-*s", availWidth, "")
-			rows = append(rows, gutter+empty)
-			continue
+			break
 		}
 		if rowEndMin > MinutesPerDay {
 			rowEndMin = MinutesPerDay
 		}
 
-		line := renderRow(m, rowStartMin, rowEndMin, availWidth, gutterWidth, layouts, dayEvents, createTotalCols)
+		line := renderRow(m, rowStartMin, rowEndMin, availWidth, gutterWidth, layouts, dayEvents, createTotalCols, todayCol, nowMin)
 		rows = append(rows, line)
 	}
 
@@ -142,20 +145,53 @@ func renderHeaders(m *Model, availWidth, gutterWidth int) string {
 
 // renderRow renders one display row (covering rowStartMin to rowEndMin) across day columns.
 func renderRow(m *Model, rowStartMin, rowEndMin, availWidth, gutterWidth int,
-	layouts []map[int]EventLayout, dayEvents [][]Event, createTotalCols int) string {
+	layouts []map[int]EventLayout, dayEvents [][]Event, createTotalCols int,
+	todayCol, nowMin int) string {
 
-	// Time gutter: show label when a major interval boundary falls within this row
+	// Determine if the current time line falls in this row
+	isNowRow := todayCol >= 0 && nowMin >= rowStartMin && nowMin < rowEndMin
+
+	// Time gutter: show label on full-hour boundaries
 	timeLabel := ""
-	labelInterval := gutterLabelInterval(m)
-	if rowStartMin%labelInterval == 0 {
+	if isNowRow {
+		timeLabel = MinToTime(nowMin)
+	} else if rowStartMin%60 == 0 {
 		timeLabel = MinToTime(rowStartMin)
-	} else {
-		// Find the first label boundary within [rowStartMin, rowEndMin)
-		nextBoundary := ((rowStartMin / labelInterval) + 1) * labelInterval
-		if nextBoundary < rowEndMin && nextBoundary < MinutesPerDay {
-			timeLabel = MinToTime(nextBoundary)
-		}
 	}
+	if isNowRow {
+		gutter := NowGutterStyle.Render(fmt.Sprintf("%-*s", gutterWidth, timeLabel))
+		var cols []string
+		for col := 0; col < m.dayCount; col++ {
+			cw := colWidthForIndex(col, m.dayCount, availWidth)
+			// Check if any events or cursor overlap this row in this column
+			hasEvent := false
+			for _, ev := range dayEvents[col] {
+				if ev.StartMin < rowEndMin && ev.EndMin > rowStartMin {
+					hasEvent = true
+					break
+				}
+			}
+			isCursorHere := col == m.cursorCol && m.cursorMin >= rowStartMin && m.cursorMin < rowEndMin
+			if hasEvent {
+				// Event present: render normally, the red gutter time signals "now"
+				cell := renderCell(m, col, rowStartMin, rowEndMin, cw, layouts[col], dayEvents[col], createTotalCols)
+				cols = append(cols, cell)
+			} else if isCursorHere {
+				// Cursor on now-row: show cursor on red line background
+				marker := " \u25ba"
+				content := fmt.Sprintf("%-*s", cw, marker)
+				style := lipgloss.NewStyle().
+					Background(lipgloss.Color("#3a0000")).
+					Foreground(lipgloss.Color("#ff0000"))
+				cols = append(cols, style.Render(content))
+			} else {
+				// Empty cell: draw the red now-line
+				cols = append(cols, nowLine(cw))
+			}
+		}
+		return gutter + strings.Join(cols, "")
+	}
+
 	gutter := TimeGutterStyle.Render(fmt.Sprintf("%-*s", gutterWidth, timeLabel))
 
 	var cols []string
@@ -168,26 +204,14 @@ func renderRow(m *Model, rowStartMin, rowEndMin, availWidth, gutterWidth int,
 	return gutter + strings.Join(cols, "")
 }
 
-// gutterLabelInterval returns the minute interval at which time labels are shown.
-func gutterLabelInterval(m *Model) int {
-	mpr := m.MinutesPerRow()
-	if m.zoomLevel == ZoomAuto {
-		// Auto-zoom: show label on every row since rows are coarse
-		return mpr
-	}
-	switch {
-	case mpr >= 60:
-		return 60 // every hour
-	case mpr >= 30:
-		return 60 // every hour
-	case mpr >= 5:
-		return 30 // every 30 min
-	default:
-		return 15 // every 15 min
-	}
+// nowLine renders a red horizontal line of the given width for the current time indicator.
+func nowLine(width int) string {
+	return NowLineStyle.Render(strings.Repeat("─", width))
 }
 
 // isSearchMatch checks if the event at the given date and index is a search match.
+// For recurring events, all occurrences (including virtual) are highlighted
+// since search matches refer to the base event by ID.
 func isSearchMatch(m *Model, col, idx int) bool {
 	if !m.searchActive || len(m.searchMatches) == 0 {
 		return false
@@ -199,7 +223,7 @@ func isSearchMatch(m *Model, col, idx int) bool {
 	}
 	evID := events[idx].ID
 	for _, match := range m.searchMatches {
-		if match.EventID == evID && DateKey(match.Date).Equal(DateKey(date)) {
+		if match.EventID == evID {
 			return true
 		}
 	}
@@ -207,6 +231,7 @@ func isSearchMatch(m *Model, col, idx int) bool {
 }
 
 // isCurrentSearchMatch checks if the event is the currently selected search match.
+// For the "current" match, we only highlight the base event on its original date.
 func isCurrentSearchMatch(m *Model, col, idx int) bool {
 	if !m.searchActive || len(m.searchMatches) == 0 {
 		return false
@@ -240,8 +265,17 @@ func renderCell(m *Model, col, rowStartMin, rowEndMin, colWidth int,
 
 	// Find all events overlapping this row's time range
 	var hits []eventHit
+	mpr := m.MinutesPerRow()
 	for i, ev := range events {
-		if ev.StartMin < rowEndMin && ev.EndMin > rowStartMin {
+		// Leave a 1-row visual gap at the bottom of events for spacing.
+		// Events must span at least 2 rows (>mpr minutes) to get a gap,
+		// otherwise the entire event would disappear.
+		visualEnd := ev.EndMin
+		rows := (ev.EndMin - ev.StartMin + mpr - 1) / mpr
+		if rows >= 2 {
+			visualEnd -= mpr
+		}
+		if ev.StartMin < rowEndMin && visualEnd > rowStartMin {
 			l := EventLayout{Col: 0, TotalCol: 1}
 			if layout != nil {
 				if ll, ok := layout[i]; ok {
@@ -297,13 +331,15 @@ func renderCell(m *Model, col, rowStartMin, rowEndMin, colWidth int,
 		return content
 	}
 
-	// Render events side by side within the column
-	// Check if any hit overlaps the create range — if so, use createTotalCols override
-	overrideTotalCols := 0
-	if m.isCreating() && col == m.cursorCol && createTotalCols > 0 {
+	// When creating an event on this column, use consistent column widths
+	// for events that overlap the create range, so their columns don't jump
+	// between normal TotalCol and createTotalCols widths across rows.
+	overrideCols := 0
+	if m.isCreating() && col == m.cursorCol && createTotalCols > 1 {
+		// Check if any hit event overlaps the create time range
 		for _, h := range hits {
 			if h.ev.StartMin < m.createEnd && h.ev.EndMin > m.createStart {
-				overrideTotalCols = createTotalCols
+				overrideCols = createTotalCols
 				break
 			}
 		}
@@ -311,11 +347,124 @@ func renderCell(m *Model, col, rowStartMin, rowEndMin, colWidth int,
 
 	if len(hits) == 1 {
 		return renderSingleEvent(m, col, hits[0].idx, hits[0].ev, hits[0].layout,
-			rowStartMin, rowEndMin, colWidth, isCursorRow, overrideTotalCols)
+			rowStartMin, rowEndMin, colWidth, isCursorRow, overrideCols)
 	}
 
-	// Multiple overlapping events: split column width
-	return renderMultiEvents(m, col, hits, rowStartMin, rowEndMin, colWidth, isCursorRow, overrideTotalCols)
+	// Multiple overlapping events: render side-by-side in sub-columns
+	return renderMultiEvents(m, col, hits, rowStartMin, rowEndMin, colWidth, isCursorRow, overrideCols)
+}
+
+// renderMultiEvents renders multiple overlapping events side-by-side in sub-columns.
+func renderMultiEvents(m *Model, col int, hits []eventHit,
+	rowStartMin, rowEndMin, colWidth int, isCursorRow bool, overrideTotalCols int) string {
+	totalCols := 1
+	for _, h := range hits {
+		if h.layout.TotalCol > totalCols {
+			totalCols = h.layout.TotalCol
+		}
+	}
+	if overrideTotalCols > totalCols {
+		totalCols = overrideTotalCols
+	}
+
+	subWidth := colWidth / totalCols
+	if subWidth < 3 {
+		subWidth = 3
+	}
+	lastSubWidth := colWidth - subWidth*(totalCols-1)
+	if lastSubWidth < subWidth {
+		lastSubWidth = subWidth
+	}
+
+	borderChars := 1
+
+	// Check for adjust mode
+	isAdjusting := false
+	for _, h := range hits {
+		if m.mode == ModeAdjust && col == m.cursorCol && h.idx == m.adjustIndex {
+			isAdjusting = true
+		}
+	}
+
+	if isAdjusting {
+		adjCols := make([]string, totalCols)
+		for i := range adjCols {
+			w := subWidth
+			if i == totalCols-1 {
+				w = lastSubWidth
+			}
+			adjCols[i] = fmt.Sprintf("%-*s", w, "")
+		}
+		for _, h := range hits {
+			c := h.layout.Col
+			if c < 0 || c >= totalCols {
+				continue
+			}
+			w := subWidth
+			if c == totalCols-1 {
+				w = lastSubWidth
+			}
+			label := eventLabel(m, h.ev, rowStartMin, rowEndMin)
+			pos := getEventRowPos(m, h.ev, rowStartMin, rowEndMin)
+			if h.idx == m.adjustIndex {
+				adjCols[c] = renderAdjustContent(m, truncLabel(label, w-borderChars), w, pos)
+			} else {
+				style := eventColorStyle(m, h.idx)
+				adjCols[c] = renderEventContent(m, h.idx, truncLabel(label, w-borderChars), w, style, true, pos)
+			}
+		}
+		return strings.Join(adjCols, "")
+	}
+
+	// Sort hits by layout column
+	sort.Slice(hits, func(a, b int) bool {
+		return hits[a].layout.Col < hits[b].layout.Col
+	})
+
+	// Get selected event for cursor highlighting
+	selectedIdx := -1
+	if isCursorRow {
+		selectedIdx = m.selectedEventIndex()
+	}
+
+	// Build sub-columns
+	subCols := make([]string, totalCols)
+	for i := range subCols {
+		w := subWidth
+		if i == totalCols-1 {
+			w = lastSubWidth
+		}
+		subCols[i] = fmt.Sprintf("%-*s", w, "")
+	}
+
+	for _, h := range hits {
+		c := h.layout.Col
+		if c < 0 || c >= totalCols {
+			continue
+		}
+		w := subWidth
+		if c == totalCols-1 {
+			w = lastSubWidth
+		}
+		label := eventLabel(m, h.ev, rowStartMin, rowEndMin)
+		pos := getEventRowPos(m, h.ev, rowStartMin, rowEndMin)
+
+		isSearchHit := isSearchMatch(m, col, h.idx)
+		isCurrentMatch := isCurrentSearchMatch(m, col, h.idx)
+
+		if isCurrentMatch {
+			subCols[c] = renderSearchSelectedContent(m, h.idx, truncLabel(label, w-borderChars), w, pos)
+		} else if isCursorRow && h.idx == selectedIdx {
+			subCols[c] = renderCursorContent(m, h.idx, truncLabel(label, w-borderChars), w, pos)
+		} else if isSearchHit {
+			subCols[c] = renderSearchContent(m, h.idx, truncLabel(label, w-borderChars), w, pos)
+		} else {
+			style := eventColorStyle(m, h.idx)
+			subCols[c] = renderEventContent(m, h.idx, truncLabel(label, w-borderChars), w, style, true, pos)
+		}
+	}
+
+	return strings.Join(subCols, "")
 }
 
 // renderCreateWithEvents renders create preview alongside existing events.
@@ -364,7 +513,8 @@ func renderCreateWithEvents(m *Model, col int, hits []eventHit,
 		}
 		label := eventLabel(m, h.ev, rowStartMin, rowEndMin)
 		style := eventColorStyle(m, h.idx)
-		subCols[c] = renderEventContent(m, h.idx, truncLabel(label, w-1), w, style, true)
+		pos := getEventRowPos(m, h.ev, rowStartMin, rowEndMin)
+		subCols[c] = renderEventContent(m, h.idx, truncLabel(label, w-1), w, style, true, pos)
 	}
 
 	// Create preview in the last sub-column
@@ -383,73 +533,119 @@ func renderCreateWithEvents(m *Model, col int, hits []eventHit,
 	return strings.Join(subCols, "")
 }
 
-// eventColorStyle returns a style for an event based on its index and the color palette.
+// eventColorStyle returns a style for an event using the first color in the palette.
 func eventColorStyle(m *Model, idx int) lipgloss.Style {
 	colors := m.settings.EventColors
 	if len(colors) == 0 {
 		return EventBlockStyle
 	}
-	bg := colors[idx%len(colors)]
+	bg := colors[0]
 	return lipgloss.NewStyle().
 		Background(lipgloss.Color(bg)).
 		Foreground(lipgloss.Color("#ffffff"))
 }
 
-// eventColor returns the hex color for an event by index.
+// eventColor returns the hex color for an event.
 func eventColor(m *Model, idx int) string {
 	colors := m.settings.EventColors
 	if len(colors) == 0 {
 		return "#005fd7"
 	}
-	return colors[idx%len(colors)]
+	return colors[0]
 }
 
-// renderEventContent renders event text with optional left color bar.
-// When borders are enabled, renders: [▎ in event color][body with dim bg]
-// When disabled, renders: [full event color bg]
-func renderEventContent(m *Model, idx int, text string, width int, style lipgloss.Style, useBorder bool) string {
-	if !useBorder || !m.settings.ShowBorders || width < 2 {
-		return style.Render(fmt.Sprintf("%-*s", width, text))
-	}
+// EventRowPos indicates where a row falls within an event's visual span.
+type EventRowPos int
 
+const (
+	EventRowMiddle EventRowPos = iota
+	EventRowTop
+	EventRowBottom
+	EventRowSingle // event is only 1 row tall
+)
+
+// getEventRowPos determines the position of a row within an event.
+func getEventRowPos(m *Model, ev Event, rowStartMin, rowEndMin int) EventRowPos {
+	mpr := m.MinutesPerRow()
+	isFirst := ev.StartMin >= rowStartMin && ev.StartMin < rowEndMin
+	// Last visual row: the row before the gap
+	visualEnd := ev.EndMin
+	rows := (ev.EndMin - ev.StartMin + mpr - 1) / mpr
+	if rows >= 2 {
+		visualEnd -= mpr
+	}
+	isLast := visualEnd > rowStartMin && visualEnd <= rowEndMin
+	switch {
+	case isFirst && isLast:
+		return EventRowSingle
+	case isFirst:
+		return EventRowTop
+	case isLast:
+		return EventRowBottom
+	default:
+		return EventRowMiddle
+	}
+}
+
+// borderBarChar returns the left border character based on position and rounded setting.
+func borderBarChar(m *Model, pos EventRowPos) string {
+	if !m.settings.RoundBorders {
+		return "\u258e" // ▎
+	}
+	switch pos {
+	case EventRowTop, EventRowSingle:
+		return "╭"
+	case EventRowBottom:
+		return "╰"
+	default:
+		return "│"
+	}
+}
+
+// renderBorderedContent renders content with left bar and body text.
+// For bottom rows with round borders, fills with horizontal lines for visual separation.
+func renderBorderedContent(m *Model, idx int, text string, width int, bgColor, fgColor string, pos EventRowPos) string {
 	color := eventColor(m, idx)
 	barStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color(color)).
-		Background(lipgloss.Color("#1c1c2e"))
+		Background(lipgloss.Color(bgColor))
 	bodyStyle := lipgloss.NewStyle().
-		Background(lipgloss.Color("#1c1c2e")).
-		Foreground(lipgloss.Color("#e0e0e0"))
+		Background(lipgloss.Color(bgColor)).
+		Foreground(lipgloss.Color(fgColor))
 
-	bar := barStyle.Render("\u258e")
+	bar := barStyle.Render(borderBarChar(m, pos))
 	bodyWidth := width - 1
-	body := bodyStyle.Render(fmt.Sprintf("%-*s", bodyWidth, text))
+	if bodyWidth < 0 {
+		bodyWidth = 0
+	}
+
+	body := bodyStyle.Render(padRight(text, bodyWidth))
 	return bar + body
 }
 
+// renderEventContent renders event text with optional left color bar.
+// When borders are enabled, renders bordered content with dim background.
+// When disabled, renders with full event color background.
+func renderEventContent(m *Model, idx int, text string, width int, style lipgloss.Style, useBorder bool, pos EventRowPos) string {
+	if !useBorder || !m.settings.ShowBorders || width < 2 {
+		return style.Render(padRight(text, width))
+	}
+	return renderBorderedContent(m, idx, text, width, "#1c1c2e", "#e0e0e0", pos)
+}
+
 // renderCursorContent renders an event on the cursor row with a subtle grey highlight.
-// Keeps the event's color bar but uses a lighter background to show selection.
-func renderCursorContent(m *Model, idx int, text string, width int) string {
+func renderCursorContent(m *Model, idx int, text string, width int, pos EventRowPos) string {
 	if m.settings.ShowBorders && width >= 2 {
-		color := eventColor(m, idx)
-		barStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color(color)).
-			Background(lipgloss.Color("#2a2a3e"))
-		bodyStyle := lipgloss.NewStyle().
-			Background(lipgloss.Color("#2a2a3e")).
-			Foreground(lipgloss.Color("#ffffff"))
-		bar := barStyle.Render("\u258e")
-		bodyWidth := width - 1
-		body := bodyStyle.Render(fmt.Sprintf("%-*s", bodyWidth, text))
-		return bar + body
+		return renderBorderedContent(m, idx, text, width, "#2a2a3e", "#ffffff", pos)
 	}
 	style := lipgloss.NewStyle().
 		Background(lipgloss.Color("#2a2a3e")).
 		Foreground(lipgloss.Color("#ffffff"))
-	return style.Render(fmt.Sprintf("%-*s", width, text))
+	return style.Render(padRight(text, width))
 }
 
 // renderSearchContent renders a search-matched event with a bright white border bar.
-func renderSearchContent(m *Model, idx int, text string, width int) string {
+func renderSearchContent(m *Model, idx int, text string, width int, pos EventRowPos) string {
 	if m.settings.ShowBorders && width >= 2 {
 		barStyle := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#ffffff")).
@@ -459,17 +655,17 @@ func renderSearchContent(m *Model, idx int, text string, width int) string {
 			Background(lipgloss.Color("#1c1c2e")).
 			Foreground(lipgloss.Color("#e0e0e0")).
 			Bold(true)
-		bar := barStyle.Render("\u258e")
+		bar := barStyle.Render(borderBarChar(m, pos))
 		bodyWidth := width - 1
-		body := bodyStyle.Render(fmt.Sprintf("%-*s", bodyWidth, text))
+		body := bodyStyle.Render(padRight(text, bodyWidth))
 		return bar + body
 	}
 	style := eventColorStyle(m, idx).Bold(true).Underline(true)
-	return style.Render(fmt.Sprintf("%-*s", width, text))
+	return style.Render(padRight(text, width))
 }
 
-// renderSearchSelectedContent renders the currently selected search result with bright distinct fill.
-func renderSearchSelectedContent(m *Model, idx int, text string, width int) string {
+// renderSearchSelectedContent renders the currently selected search result.
+func renderSearchSelectedContent(m *Model, idx int, text string, width int, pos EventRowPos) string {
 	if m.settings.ShowBorders && width >= 2 {
 		barStyle := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#ffd700")).
@@ -479,20 +675,20 @@ func renderSearchSelectedContent(m *Model, idx int, text string, width int) stri
 			Background(lipgloss.Color("#3a3520")).
 			Foreground(lipgloss.Color("#ffd700")).
 			Bold(true)
-		bar := barStyle.Render("\u258e")
+		bar := barStyle.Render(borderBarChar(m, pos))
 		bodyWidth := width - 1
-		body := bodyStyle.Render(fmt.Sprintf("%-*s", bodyWidth, text))
+		body := bodyStyle.Render(padRight(text, bodyWidth))
 		return bar + body
 	}
 	style := lipgloss.NewStyle().
 		Background(lipgloss.Color("#3a3520")).
 		Foreground(lipgloss.Color("#ffd700")).
 		Bold(true)
-	return style.Render(fmt.Sprintf("%-*s", width, text))
+	return style.Render(padRight(text, width))
 }
 
 // renderAdjustContent renders an event in adjust mode with orange left bar and dim bg.
-func renderAdjustContent(m *Model, text string, width int) string {
+func renderAdjustContent(m *Model, text string, width int, pos EventRowPos) string {
 	adjustColor := "#ff5f00"
 	if m.settings.ShowBorders && width >= 2 {
 		barStyle := lipgloss.NewStyle().
@@ -502,12 +698,12 @@ func renderAdjustContent(m *Model, text string, width int) string {
 			Background(lipgloss.Color("#2a1a0e")).
 			Foreground(lipgloss.Color("#f0d0a0")).
 			Bold(true)
-		bar := barStyle.Render("\u258e")
+		bar := barStyle.Render(borderBarChar(m, pos))
 		bodyWidth := width - 1
-		body := bodyStyle.Render(fmt.Sprintf("%-*s", bodyWidth, text))
+		body := bodyStyle.Render(padRight(text, bodyWidth))
 		return bar + body
 	}
-	return AdjustEventStyle.Render(fmt.Sprintf("%-*s", width, text))
+	return AdjustEventStyle.Render(padRight(text, width))
 }
 
 // renderCreatePreviewContent renders create preview with the same left color bar style as events.
@@ -523,13 +719,13 @@ func renderCreatePreviewContent(m *Model, text string, width int) string {
 			Foreground(lipgloss.Color("#e0e0e0"))
 		bar := barStyle.Render("\u258e")
 		bodyWidth := width - 1
-		body := bodyStyle.Render(fmt.Sprintf("%-*s", bodyWidth, text))
+		body := bodyStyle.Render(padRight(text, bodyWidth))
 		return bar + body
 	}
 	style := lipgloss.NewStyle().
 		Background(lipgloss.Color(createColor)).
 		Foreground(lipgloss.Color("#ffffff"))
-	return style.Render(fmt.Sprintf("%-*s", width, text))
+	return style.Render(padRight(text, width))
 }
 
 func renderSingleEvent(m *Model, col, idx int, ev Event, layout EventLayout,
@@ -561,6 +757,7 @@ func renderSingleEvent(m *Model, col, idx int, ev Event, layout EventLayout,
 	}
 
 	label := eventLabel(m, ev, rowStartMin, rowEndMin)
+	pos := getEventRowPos(m, ev, rowStartMin, rowEndMin)
 
 	// Determine the style for this event
 	isAdjusting := m.mode == ModeAdjust && col == m.cursorCol && idx == m.adjustIndex
@@ -571,21 +768,24 @@ func renderSingleEvent(m *Model, col, idx int, ev Event, layout EventLayout,
 		style = eventColorStyle(m, idx)
 	}
 
+	// Calculate max label width accounting for left border
+	borderChars := 1
+
 	if totalCols <= 1 {
 		// Single column: render the whole cell
 		if isAdjusting {
-			return renderAdjustContent(m, truncLabel(label, colWidth-1), colWidth)
+			return renderAdjustContent(m, truncLabel(label, colWidth-borderChars), colWidth, pos)
 		}
 		if isCurrentMatch {
-			return renderSearchSelectedContent(m, idx, truncLabel(label, colWidth-1), colWidth)
+			return renderSearchSelectedContent(m, idx, truncLabel(label, colWidth-borderChars), colWidth, pos)
 		}
 		if isCursorRow {
-			return renderCursorContent(m, idx, truncLabel(label, colWidth-1), colWidth)
+			return renderCursorContent(m, idx, truncLabel(label, colWidth-borderChars), colWidth, pos)
 		}
 		if isSearchHit {
-			return renderSearchContent(m, idx, truncLabel(label, colWidth-1), colWidth)
+			return renderSearchContent(m, idx, truncLabel(label, colWidth-borderChars), colWidth, pos)
 		}
-		return renderEventContent(m, idx, truncLabel(label, colWidth-1), colWidth, style, true)
+		return renderEventContent(m, idx, truncLabel(label, colWidth-borderChars), colWidth, style, true, pos)
 	}
 
 	// Multi sub-columns: only style the event content, leave prefix/suffix unstyled
@@ -593,15 +793,15 @@ func renderSingleEvent(m *Model, col, idx int, ev Event, layout EventLayout,
 	prefix := fmt.Sprintf("%-*s", offset, "")
 	var styledContent string
 	if isAdjusting {
-		styledContent = renderAdjustContent(m, truncLabel(label, w-1), w)
+		styledContent = renderAdjustContent(m, truncLabel(label, w-borderChars), w, pos)
 	} else if isCurrentMatch {
-		styledContent = renderSearchSelectedContent(m, idx, truncLabel(label, w-1), w)
+		styledContent = renderSearchSelectedContent(m, idx, truncLabel(label, w-borderChars), w, pos)
 	} else if isCursorRow {
-		styledContent = renderCursorContent(m, idx, truncLabel(label, w-1), w)
+		styledContent = renderCursorContent(m, idx, truncLabel(label, w-borderChars), w, pos)
 	} else if isSearchHit {
-		styledContent = renderSearchContent(m, idx, truncLabel(label, w-1), w)
+		styledContent = renderSearchContent(m, idx, truncLabel(label, w-borderChars), w, pos)
 	} else {
-		styledContent = renderEventContent(m, idx, truncLabel(label, w-1), w, style, true)
+		styledContent = renderEventContent(m, idx, truncLabel(label, w-borderChars), w, style, true, pos)
 	}
 	remaining := colWidth - offset - w
 	suffix := ""
@@ -612,16 +812,23 @@ func renderSingleEvent(m *Model, col, idx int, ev Event, layout EventLayout,
 }
 
 // eventLabel returns the label to display for an event in a given row.
-// Shows title on the event's first row, description on the row after (if enabled).
+// Shows title on the event's first row, time range on the row after, description on the row after that (if enabled).
 func eventLabel(m *Model, ev Event, rowStartMin, rowEndMin int) string {
+	mpr := m.MinutesPerRow()
+	titleRowStart := (ev.StartMin / mpr) * mpr
+	titleRowEnd := titleRowStart + mpr
+
 	if ev.StartMin >= rowStartMin && ev.StartMin < rowEndMin {
+		// First row: show title
 		return displayTitle(ev)
 	}
+	if rowStartMin == titleRowEnd {
+		// Second row: show time range
+		return MinToTime(ev.StartMin) + " – " + MinToTime(ev.EndMin)
+	}
 	if m.settings.ShowDescs && ev.Desc != "" {
-		mpr := m.MinutesPerRow()
-		titleRowStart := (ev.StartMin / mpr) * mpr
-		titleRowEnd := titleRowStart + mpr
-		if rowStartMin == titleRowEnd {
+		descRowStart := titleRowEnd + mpr
+		if rowStartMin == descRowStart {
 			return ev.Desc
 		}
 	}
@@ -636,126 +843,26 @@ func displayTitle(ev Event) string {
 	return ev.Title
 }
 
-// truncLabel truncates a label to fit in maxLen characters, adding "." if truncated.
+// truncLabel truncates a label to fit in maxLen display columns, adding "." if truncated.
 func truncLabel(label string, maxLen int) string {
 	if maxLen <= 0 {
 		return ""
 	}
-	if len(label) <= maxLen {
+	runes := []rune(label)
+	if len(runes) <= maxLen {
 		return label
 	}
 	if maxLen <= 1 {
 		return "."
 	}
-	return label[:maxLen-1] + "."
+	return string(runes[:maxLen-1]) + "."
 }
 
-func renderMultiEvents(m *Model, col int, hits []eventHit,
-	rowStartMin, rowEndMin, colWidth int, isCursorRow bool, overrideTotalCols int) string {
-	totalCols := 1
-	for _, h := range hits {
-		if h.layout.TotalCol > totalCols {
-			totalCols = h.layout.TotalCol
-		}
+// padRight pads a string with spaces to the given display width (rune-aware).
+func padRight(s string, width int) string {
+	runeLen := len([]rune(s))
+	if runeLen >= width {
+		return s
 	}
-	if overrideTotalCols > totalCols {
-		totalCols = overrideTotalCols
-	}
-
-	subWidth := colWidth / totalCols
-	if subWidth < 3 {
-		subWidth = 3
-	}
-	// Last sub-column gets any remaining pixels
-	lastSubWidth := colWidth - subWidth*(totalCols-1)
-	if lastSubWidth < subWidth {
-		lastSubWidth = subWidth
-	}
-
-	// Check special states
-	isAdjusting := false
-	for _, h := range hits {
-		if m.mode == ModeAdjust && col == m.cursorCol && h.idx == m.adjustIndex {
-			isAdjusting = true
-		}
-	}
-
-	if isAdjusting {
-		// Render each sub-column, highlighting the adjusted event with adjust style
-		adjCols := make([]string, totalCols)
-		for i := range adjCols {
-			w := subWidth
-			if i == totalCols-1 {
-				w = lastSubWidth
-			}
-			adjCols[i] = fmt.Sprintf("%-*s", w, "")
-		}
-		for _, h := range hits {
-			c := h.layout.Col
-			if c < 0 || c >= totalCols {
-				continue
-			}
-			w := subWidth
-			if c == totalCols-1 {
-				w = lastSubWidth
-			}
-			label := eventLabel(m, h.ev, rowStartMin, rowEndMin)
-			if h.idx == m.adjustIndex {
-				adjCols[c] = renderAdjustContent(m, truncLabel(label, w-1), w)
-			} else {
-				style := eventColorStyle(m, h.idx)
-				adjCols[c] = renderEventContent(m, h.idx, truncLabel(label, w-1), w, style, true)
-			}
-		}
-		return strings.Join(adjCols, "")
-	}
-
-	// Sort hits by their layout column for correct positioning
-	sort.Slice(hits, func(a, b int) bool {
-		return hits[a].layout.Col < hits[b].layout.Col
-	})
-
-	// Get the selected event index for cursor row highlighting
-	selectedIdx := -1
-	if isCursorRow {
-		selectedIdx = m.selectedEventIndex()
-	}
-
-	// Build sub-columns array, filling gaps with empty space
-	subCols := make([]string, totalCols)
-	for i := range subCols {
-		w := subWidth
-		if i == totalCols-1 {
-			w = lastSubWidth
-		}
-		subCols[i] = fmt.Sprintf("%-*s", w, "")
-	}
-
-	for _, h := range hits {
-		c := h.layout.Col
-		if c < 0 || c >= totalCols {
-			continue
-		}
-		w := subWidth
-		if c == totalCols-1 {
-			w = lastSubWidth
-		}
-		label := eventLabel(m, h.ev, rowStartMin, rowEndMin)
-
-		isSearchHit := isSearchMatch(m, col, h.idx)
-		isCurrentMatch := isCurrentSearchMatch(m, col, h.idx)
-
-		if isCurrentMatch {
-			subCols[c] = renderSearchSelectedContent(m, h.idx, truncLabel(label, w-1), w)
-		} else if isCursorRow && h.idx == selectedIdx {
-			subCols[c] = renderCursorContent(m, h.idx, truncLabel(label, w-1), w)
-		} else if isSearchHit {
-			subCols[c] = renderSearchContent(m, h.idx, truncLabel(label, w-1), w)
-		} else {
-			style := eventColorStyle(m, h.idx)
-			subCols[c] = renderEventContent(m, h.idx, truncLabel(label, w-1), w, style, true)
-		}
-	}
-
-	return strings.Join(subCols, "")
+	return s + strings.Repeat(" ", width-runeLen)
 }

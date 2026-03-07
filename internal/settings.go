@@ -17,35 +17,9 @@ type settingsItem struct {
 	actionR func(m *Model)        // l key action (increase/next)
 }
 
-// jumpPercentOptions are the available jump percent values.
-var jumpPercentOptions = []int{2, 3, 5, 8, 10, 15, 20, 25}
-
 // settingsItems returns the list of settings menu items.
 func settingsItems() []settingsItem {
 	return []settingsItem{
-		{
-			label: "Zoom level",
-			display: func(m *Model) string {
-				if m.zoomLevel == ZoomAuto {
-					return "auto"
-				}
-				return fmt.Sprintf("%d min/row", m.zoomLevel)
-			},
-			action: func(m *Model) {
-				// Toggle: reset to auto
-				m.zoomLevel = ZoomAuto
-				m.viewportOffset = m.dayStartMin()
-				m.saveSettings()
-			},
-			actionL: func(m *Model) {
-				m.zoomOut()
-				m.saveSettings()
-			},
-			actionR: func(m *Model) {
-				m.zoomIn()
-				m.saveSettings()
-			},
-		},
 		{
 			label: "Show keybinding hints",
 			display: func(m *Model) string {
@@ -57,22 +31,6 @@ func settingsItems() []settingsItem {
 			action: func(m *Model) {
 				m.settings.ShowHints = !m.settings.ShowHints
 				m.saveSettings()
-			},
-		},
-		{
-			label: "Jump step (% of view)",
-			display: func(m *Model) string {
-				return fmt.Sprintf("%d%%", m.settings.JumpPercent)
-			},
-			action: func(m *Model) {
-				// Cycle forward through options
-				cycleJumpPercent(m, 1)
-			},
-			actionL: func(m *Model) {
-				cycleJumpPercent(m, -1)
-			},
-			actionR: func(m *Model) {
-				cycleJumpPercent(m, 1)
 			},
 		},
 		{
@@ -113,6 +71,19 @@ func settingsItems() []settingsItem {
 			},
 		},
 		{
+			label: "Rounded event corners",
+			display: func(m *Model) string {
+				if m.settings.RoundBorders {
+					return "on"
+				}
+				return "off"
+			},
+			action: func(m *Model) {
+				m.settings.RoundBorders = !m.settings.RoundBorders
+				m.saveSettings()
+			},
+		},
+		{
 			label: "Quick create (skip recurrence)",
 			display: func(m *Model) string {
 				if m.settings.QuickCreate {
@@ -138,58 +109,7 @@ func settingsItems() []settingsItem {
 				m.saveSettings()
 			},
 		},
-		{
-			label: "Day start hour",
-			display: func(m *Model) string {
-				return fmt.Sprintf("%02d:00", m.settings.DayStartHour)
-			},
-			action: func(m *Model) {
-				// Reset to default (08:00)
-				m.settings.DayStartHour = 8
-				m.ensureCursorVisible()
-				m.saveSettings()
-			},
-			actionL: func(m *Model) {
-				if m.settings.DayStartHour > 0 {
-					m.settings.DayStartHour--
-					m.ensureCursorVisible()
-					m.saveSettings()
-				}
-			},
-			actionR: func(m *Model) {
-				if m.settings.DayStartHour < 23 {
-					m.settings.DayStartHour++
-					m.ensureCursorVisible()
-					m.saveSettings()
-				}
-			},
-		},
 	}
-}
-
-// cycleJumpPercent cycles the jump percent through predefined options.
-func cycleJumpPercent(m *Model, dir int) {
-	current := m.settings.JumpPercent
-	idx := 0
-	for i, v := range jumpPercentOptions {
-		if v == current {
-			idx = i
-			break
-		}
-		if v > current {
-			idx = i
-			break
-		}
-	}
-	idx += dir
-	if idx < 0 {
-		idx = 0
-	}
-	if idx >= len(jumpPercentOptions) {
-		idx = len(jumpPercentOptions) - 1
-	}
-	m.settings.JumpPercent = jumpPercentOptions[idx]
-	m.saveSettings()
 }
 
 // updateSettings handles key events in the settings menu.

@@ -40,6 +40,7 @@ type Settings struct {
 	EventColors  []string `json:"event_colors"`   // hex colors for events, cycled by index
 	ShowBorders  bool     `json:"show_borders"`   // show left color bar on events
 	ShowDescs    bool     `json:"show_descs"`     // show event descriptions in grid
+	RoundBorders bool     `json:"round_borders"`  // use rounded corners on events
 	QuickCreate  bool     `json:"quick_create"`   // skip recurrence picker in create flow
 	SkipDesc     bool     `json:"skip_desc"`      // skip description step in create flow
 	DayStartHour int      `json:"day_start_hour"` // hour to start the day view (0-23)
@@ -73,9 +74,10 @@ func DefaultSettings() Settings {
 		EventColors:  DefaultEventColors,
 		ShowBorders:  true,
 		ShowDescs:    true,
+		RoundBorders: false,
 		QuickCreate:  false,
 		SkipDesc:     false,
-		DayStartHour: 8,
+		DayStartHour: 0,
 	}
 }
 
