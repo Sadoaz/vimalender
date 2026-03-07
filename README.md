@@ -5,7 +5,11 @@ A vim-style terminal calendar built with Go, [Bubbletea](https://github.com/char
 Navigate, create, and manage events entirely from the keyboard with familiar vim motions.
 
 
-https://github.com/user-attachments/assets/94059b5d-a0d2-4968-9b54-b7d608e4a526
+
+
+https://github.com/user-attachments/assets/3fd118bb-7acf-444f-8a72-b4837b4af1e1
+
+
 
 
 
