@@ -6,6 +6,9 @@ Navigate, create, move, search, and customize events entirely from the keyboard 
 
 
 Demo:
+
+
+
 https://github.com/user-attachments/assets/5c1090b0-922f-4f04-b4ba-83717fbde6fb
 
 
