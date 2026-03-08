@@ -104,7 +104,6 @@ Press `?` any time in the main UI to open the help panel. It shows the current b
 | `Enter` | Open detail view for event under cursor |
 | `m` | Enter move mode |
 | `e` | Edit event in `$EDITOR` (falls back to `vi`) |
-| `s` | Open inline edit menu (in adjust mode) |
 | `dd` | Delete event (vim-style double-key) |
 | `x` | Cut selected event |
 | `y` | Copy selected event |
@@ -171,27 +170,10 @@ Enter with `m` on any event. The event stays pinned to its visual column during 
 | `h` / `l` | Move event to previous / next day |
 | `g` | Jump move preview to a typed time |
 | `G` | Jump move preview to a typed day of month |
-| `s` | Open inline edit menu |
 | `Enter` | Confirm move preview |
 | `Esc` | Cancel move |
 
 For recurring events, `Enter` opens the `(o)ne / (a)ll` prompt after you have already previewed the new position.
-
-### Inline Edit Menu
-
-Opens from adjust mode with `s`. A 7-field form for editing events without leaving the terminal.
-
-| Field | Description |
-|-------|-------------|
-| Title | Event title |
-| Desc | Short description |
-| Date | Date (YYYY-MM-DD) |
-| Start | Start time (HH:MM) |
-| End | End time (HH:MM) |
-| Repeat | Recurrence pattern (cycle with Enter) |
-| Until | Recurrence end date (YYYY-MM-DD or empty) |
-
-Navigate with `j`/`k`, edit with `Enter`, save and exit with `Esc`/`q`.
 
 ### Detail View
 
@@ -290,4 +272,3 @@ The generated template also places notes in a more convenient editing position.
 - Terminal with 256-color or truecolor support
 - Minimum terminal size: 80x24
 - Go 1.25+ (build only)
-
