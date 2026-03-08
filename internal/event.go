@@ -668,18 +668,16 @@ func (s *EventStore) EventsAtMinute(date time.Time, minute int) []int {
 	return indices
 }
 
-// VisualEventsAtMinute returns event indices at the given minute, respecting
-// the visual gap at the bottom of multi-row events. This prevents selecting
-// events on their gap row.
+// VisualEventsAtMinute returns event indices at the given minute using the
+// same visible time bounds as rendering.
 func (s *EventStore) VisualEventsAtMinute(date time.Time, minute, mpr int) []int {
 	events := s.GetByDate(date)
+	rowEnd := minute + mpr
 	var indices []int
 	for i, ev := range events {
-		visualEnd := ev.EndMin
-		if ev.EndMin-ev.StartMin > mpr {
-			visualEnd -= mpr
-		}
-		if minute >= ev.StartMin && minute < visualEnd {
+		visualEnd := visualEventEndMin(ev.StartMin, ev.EndMin, mpr)
+		// Event overlaps this row if it starts before row end and ends after row start
+		if ev.StartMin < rowEnd && visualEnd > minute {
 			indices = append(indices, i)
 		}
 	}

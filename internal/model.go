@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -59,9 +60,12 @@ const (
 const ZoomAuto = -1
 
 const DefaultZoomLevel = 30
+const MaxPreciseZoomLevel = 30
+const MinZoomLevel = 1
 
-// ZoomLevels are the zoom levels (minutes per row).
-var ZoomLevels = []int{1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30}
+// ZoomLevels are the supported zoom levels (minutes per row).
+// Keep this small and deliberate so zooming lands on useful calendar views.
+var ZoomLevels = []int{1, 5, 15, 20, 30}
 
 // Model is the single Bubbletea model for Vimalender.
 type Model struct {
@@ -154,9 +158,9 @@ type Model struct {
 	recurDeleteIdx int // index in GetByDate result for the event being deleted
 
 	// Undo stack — snapshots of event store before each mutation
-	undoStack []map[time.Time][]Event
+	undoStack []undoSnapshot
 	// Redo stack — snapshots pushed when undoing
-	redoStack []map[time.Time][]Event
+	redoStack []undoSnapshot
 
 	// Overlap selection: tracks the event ID so selection is stable
 	// even when GetByDate ordering changes.  "" = no selection.
@@ -166,6 +170,15 @@ type Model struct {
 	visualAnchorDate   time.Time
 	visualAnchorMin    int
 	pendingYank        bool
+}
+
+type undoSnapshot struct {
+	events             map[time.Time][]Event
+	windowStart        time.Time
+	cursorCol          int
+	cursorMin          int
+	viewportOffset     int
+	selectedOverlapEvt string
 }
 
 type ClipboardItem struct {
@@ -211,6 +224,10 @@ func NewModel() Model {
 		zoomLevel = DefaultZoomLevel
 	}
 
+	// Snap restored position to grid boundaries
+	cursorMin = (cursorMin / zoomLevel) * zoomLevel
+	viewportOffset = (viewportOffset / zoomLevel) * zoomLevel
+
 	width, height := initialTerminalSize()
 
 	return Model{
@@ -252,9 +269,24 @@ func (m *Model) SelectedDate() time.Time {
 func (m *Model) selectedEventIndex() int {
 	date := m.SelectedDate()
 	events := m.store.GetByDate(date)
+	if m.cursorMin == m.dayStartMin() {
+		if idx := m.selectedAllDayEventIndex(date); idx >= 0 {
+			return idx
+		}
+	}
 	indices := m.store.VisualEventsAtMinute(date, m.cursorMin, m.MinutesPerRow())
 	if len(indices) == 0 {
 		return -1
+	}
+	if m.searchActive && m.searchIndex >= 0 && m.searchIndex < len(m.searchMatches) {
+		match := m.searchMatches[m.searchIndex]
+		if DateKey(match.Date).Equal(DateKey(date)) {
+			for _, idx := range indices {
+				if idx < len(events) && events[idx].ID == match.EventID {
+					return idx
+				}
+			}
+		}
 	}
 	// If we have a specific event selected by ID, try to find it in the overlap list
 	if m.selectedOverlapEvt != "" {
@@ -265,6 +297,45 @@ func (m *Model) selectedEventIndex() int {
 		}
 	}
 	// Fall back to first overlapping event
+	return indices[0]
+}
+
+func (m *Model) allDayEventIndices(date time.Time) []int {
+	events := m.store.GetByDate(date)
+	var indices []int
+	seen := map[string]bool{}
+	for i, ev := range events {
+		segments := occurrenceSegments(m, ev)
+		duration := 0
+		for _, seg := range segments {
+			duration += seg.EndMin - seg.StartMin
+		}
+		if len(segments) <= 1 || duration < MinutesPerDay {
+			continue
+		}
+		key := m.selectionKeyForEvent(ev)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		indices = append(indices, i)
+	}
+	return indices
+}
+
+func (m *Model) selectedAllDayEventIndex(date time.Time) int {
+	events := m.store.GetByDate(date)
+	indices := m.allDayEventIndices(date)
+	if len(indices) == 0 {
+		return -1
+	}
+	if m.selectedOverlapEvt != "" {
+		for _, idx := range indices {
+			if idx < len(events) && events[idx].ID == m.selectedOverlapEvt {
+				return idx
+			}
+		}
+	}
 	return indices[0]
 }
 
@@ -582,6 +653,12 @@ func (m *Model) applyRecurringAdjustPreview(date time.Time, events []Event) []Ev
 func (m *Model) autoSelectOverlapEvent() {
 	date := m.SelectedDate()
 	events := m.store.GetByDate(date)
+	if m.cursorMin == m.dayStartMin() {
+		if idx := m.selectedAllDayEventIndex(date); idx >= 0 {
+			m.selectedOverlapEvt = events[idx].ID
+			return
+		}
+	}
 	indices := m.store.VisualEventsAtMinute(date, m.cursorMin, m.MinutesPerRow())
 	if len(indices) == 0 {
 		return
@@ -621,6 +698,11 @@ func (m *Model) autoSelectOverlapEvent() {
 // regardless of whether they all overlap the exact cursor minute.
 func (m *Model) sortedOverlapIndices(date time.Time, minute int) []int {
 	events := m.store.GetByDate(date)
+	if minute == m.dayStartMin() {
+		if indices := m.allDayEventIndices(date); len(indices) > 0 {
+			return indices
+		}
+	}
 	layout := m.store.LayoutEvents(date, "", 0)
 	if layout == nil {
 		return m.store.EventsAtMinute(date, minute)
@@ -712,7 +794,14 @@ func (m *Model) saveEvents() {
 // pushUndo saves a snapshot of the current events for undo.
 func (m *Model) pushUndo() {
 	const maxUndo = 50
-	m.undoStack = append(m.undoStack, m.store.Snapshot())
+	m.undoStack = append(m.undoStack, undoSnapshot{
+		events:             m.store.Snapshot(),
+		windowStart:        m.windowStart,
+		cursorCol:          m.cursorCol,
+		cursorMin:          m.cursorMin,
+		viewportOffset:     m.viewportOffset,
+		selectedOverlapEvt: m.selectedOverlapEvt,
+	})
 	if len(m.undoStack) > maxUndo {
 		m.undoStack = m.undoStack[len(m.undoStack)-maxUndo:]
 	}
@@ -724,10 +813,22 @@ func (m *Model) popUndo() bool {
 	if len(m.undoStack) == 0 {
 		return false
 	}
-	m.redoStack = append(m.redoStack, m.store.Snapshot())
+	m.redoStack = append(m.redoStack, undoSnapshot{
+		events:             m.store.Snapshot(),
+		windowStart:        m.windowStart,
+		cursorCol:          m.cursorCol,
+		cursorMin:          m.cursorMin,
+		viewportOffset:     m.viewportOffset,
+		selectedOverlapEvt: m.selectedOverlapEvt,
+	})
 	snap := m.undoStack[len(m.undoStack)-1]
 	m.undoStack = m.undoStack[:len(m.undoStack)-1]
-	m.store.Restore(snap)
+	m.store.Restore(snap.events)
+	m.windowStart = snap.windowStart
+	m.cursorCol = snap.cursorCol
+	m.cursorMin = snap.cursorMin
+	m.viewportOffset = snap.viewportOffset
+	m.selectedOverlapEvt = snap.selectedOverlapEvt
 	m.saveEvents()
 	return true
 }
@@ -737,10 +838,22 @@ func (m *Model) popRedo() bool {
 	if len(m.redoStack) == 0 {
 		return false
 	}
-	m.undoStack = append(m.undoStack, m.store.Snapshot())
+	m.undoStack = append(m.undoStack, undoSnapshot{
+		events:             m.store.Snapshot(),
+		windowStart:        m.windowStart,
+		cursorCol:          m.cursorCol,
+		cursorMin:          m.cursorMin,
+		viewportOffset:     m.viewportOffset,
+		selectedOverlapEvt: m.selectedOverlapEvt,
+	})
 	snap := m.redoStack[len(m.redoStack)-1]
 	m.redoStack = m.redoStack[:len(m.redoStack)-1]
-	m.store.Restore(snap)
+	m.store.Restore(snap.events)
+	m.windowStart = snap.windowStart
+	m.cursorCol = snap.cursorCol
+	m.cursorMin = snap.cursorMin
+	m.viewportOffset = snap.viewportOffset
+	m.selectedOverlapEvt = snap.selectedOverlapEvt
 	m.saveEvents()
 	return true
 }
@@ -960,18 +1073,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		firstResize := m.width == 0 && m.height == 0
 		m.width = msg.Width
 		m.height = msg.Height
-		// If current zoom level is too coarse for the new size, switch to auto
-		if m.zoomLevel != ZoomAuto {
-			vpHeight := m.viewportHeight()
-			visibleMinutes := MinutesPerDay - m.dayStartMin()
-			maxMpr := visibleMinutes / vpHeight
-			if maxMpr < 1 {
-				maxMpr = 1
-			}
-			if m.zoomLevel > maxMpr {
-				m.zoomLevel = ZoomAuto
-			}
-		}
 		// On first resize (app startup), center viewport on current time
 		if firstResize {
 			now := time.Now()
@@ -987,6 +1088,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.centerViewportOnCursor()
+		} else {
+			mpr := m.MinutesPerRow()
+			visibleMinutes := mpr * m.viewportHeight()
+			dayVisible := MinutesPerDay - m.dayStartMin()
+			if visibleMinutes >= dayVisible {
+				m.viewportOffset = m.dayStartMin()
+			} else {
+				m.ensureCursorVisible()
+			}
 		}
 		return m, nil
 
@@ -1056,7 +1166,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) viewportHeight() int {
-	h := m.height - 3 // 1 header + 1 newline + 1 status bar
+	// Reserve 1 line for the header and 1 for the bottom status bar.
+	// Input/search/goto prompts need one extra line above the status bar.
+	h := m.height - 2
+	switch m.mode {
+	case ModeInput, ModeInputDesc, ModeInputRecurrence, ModeSearch, ModeGoto, ModeGotoDay:
+		h--
+	}
 	if h < 1 {
 		h = 1
 	}
@@ -1083,10 +1199,22 @@ func (m *Model) centerViewportOnCursor() {
 	m.viewportOffset = (m.viewportOffset / mpr) * mpr
 }
 
+func (m *Model) zoomAnchorMinute() int {
+	idx := m.selectedEventIndex()
+	if idx >= 0 {
+		events := m.store.GetByDate(m.SelectedDate())
+		if idx < len(events) {
+			return events[idx].StartMin
+		}
+	}
+	return m.cursorMin
+}
+
 func (m *Model) applyZoomLevel(level int) {
+	anchor := m.zoomAnchorMinute()
 	m.zoomLevel = level
 	mpr := m.MinutesPerRow()
-	m.cursorMin = (m.cursorMin / mpr) * mpr
+	m.cursorMin = (anchor / mpr) * mpr
 	m.centerViewportOnCursor()
 }
 
@@ -1135,26 +1263,39 @@ func (m *Model) zoomOut() {
 }
 
 func (m *Model) resetDefaultView() {
-	m.applyZoomLevel(DefaultZoomLevel)
+	m.zoomLevel = DefaultZoomLevel
+	m.cursorMin = m.dayStartMin()
+	m.viewportOffset = m.dayStartMin()
 }
 
 // autoMpr returns what MinutesPerRow would be in auto mode.
 func (m *Model) autoMpr() int {
 	vpHeight := m.viewportHeight()
 	if vpHeight <= 0 {
-		return 30
+		return DefaultZoomLevel
 	}
 	visibleMinutes := MinutesPerDay - m.dayStartMin()
-	mpr := (visibleMinutes + vpHeight - 1) / vpHeight
-	if mpr < 1 {
-		mpr = 1
+	target := (visibleMinutes + vpHeight - 1) / vpHeight
+	if target < 1 {
+		target = 1
 	}
-	return mpr
+	if target > MaxPreciseZoomLevel {
+		target = MaxPreciseZoomLevel
+	}
+	best := 1
+	for _, level := range ZoomLevels {
+		if level > target {
+			break
+		}
+		best = level
+	}
+	return best
 }
 
 // ensureCursorVisible adjusts viewport offset so the cursor is visible.
 func (m *Model) ensureCursorVisible() {
 	mpr := m.MinutesPerRow()
+	m.cursorMin = (m.cursorMin / mpr) * mpr
 	vpHeight := m.viewportHeight()
 	vpEnd := m.viewportOffset + mpr*vpHeight
 
@@ -1175,6 +1316,7 @@ func (m *Model) ensureCursorVisible() {
 	if m.viewportOffset < 0 {
 		m.viewportOffset = 0
 	}
+	m.viewportOffset = (m.viewportOffset / mpr) * mpr
 }
 
 // ensureCreateVisible adjusts viewport so the create preview end is visible.
@@ -1250,8 +1392,12 @@ func (m *Model) maxDayCount() int {
 func (m *Model) jumpStep() int {
 	mpr := m.MinutesPerRow()
 	vpHeight := m.viewportHeight()
+	pct := m.settings.JumpPercent
+	if pct < 1 {
+		pct = 5
+	}
 	totalVisible := mpr * vpHeight
-	step := totalVisible * 2 / 100
+	step := totalVisible * pct / 100
 	if step < mpr {
 		step = mpr
 	}
@@ -1480,7 +1626,8 @@ func (m Model) updateNavigate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.autoSelectOverlapEvent()
 
 	case IsKey(msg, KeyShiftJ):
-		m.cursorMin++
+		mpr := m.MinutesPerRow()
+		m.cursorMin += mpr
 		if m.cursorMin >= MinutesPerDay {
 			// Wrap to start of next day
 			if m.cursorCol < m.dayCount-1 {
@@ -1495,7 +1642,8 @@ func (m Model) updateNavigate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ensureCursorVisible()
 
 	case IsKey(msg, KeyShiftK):
-		m.cursorMin--
+		mpr := m.MinutesPerRow()
+		m.cursorMin -= mpr
 		if m.cursorMin < 0 {
 			// Wrap to end of previous day
 			if m.cursorCol > 0 {
@@ -1588,7 +1736,7 @@ func (m Model) updateNavigate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = ModeCreate
 		mpr := m.MinutesPerRow()
 		m.createStart = (m.cursorMin / mpr) * mpr
-		m.createEnd = m.createStart + m.jumpStep()
+		m.createEnd = m.createStart + mpr
 		if m.createEnd > MinutesPerDay {
 			m.createEnd = MinutesPerDay
 		}
@@ -1857,8 +2005,8 @@ func (m Model) updateCreate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = ModeNavigate
 
 	case IsKey(msg, KeyJ):
-		step := m.jumpStep()
-		newEnd := m.createEnd + step
+		mpr := m.MinutesPerRow()
+		newEnd := m.createEnd + mpr
 		if newEnd > MaxCreateSpanDays*MinutesPerDay {
 			newEnd = MaxCreateSpanDays * MinutesPerDay
 		}
@@ -1866,13 +2014,31 @@ func (m Model) updateCreate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ensureCreateVisible()
 
 	case IsKey(msg, KeyK):
-		step := m.jumpStep()
-		newEnd := m.createEnd - step
 		mpr := m.MinutesPerRow()
+		newEnd := m.createEnd - mpr
 		minEnd := m.createStart + mpr
 		if minEnd > MinutesPerDay {
 			minEnd = m.createStart + 1
 		}
+		if newEnd < minEnd {
+			newEnd = minEnd
+		}
+		m.createEnd = newEnd
+		m.ensureCreateVisible()
+
+	case IsKey(msg, KeyCtrlD):
+		step := m.createFastStep()
+		newEnd := m.createEnd + step
+		if newEnd > MaxCreateSpanDays*MinutesPerDay {
+			newEnd = MaxCreateSpanDays * MinutesPerDay
+		}
+		m.createEnd = newEnd
+		m.ensureCreateVisible()
+
+	case IsKey(msg, KeyCtrlU):
+		step := m.createFastStep()
+		newEnd := m.createEnd - step
+		minEnd := m.createStart + 1
 		if newEnd < minEnd {
 			newEnd = minEnd
 		}
@@ -1896,6 +2062,16 @@ func (m Model) updateCreate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ensureCreateVisible()
 
 	case IsKey(msg, KeyEnter):
+		// Snap create times to grid boundaries before entering title input
+		mpr := m.MinutesPerRow()
+		m.createStart = (m.createStart / mpr) * mpr
+		m.createEnd = ((m.createEnd + mpr - 1) / mpr) * mpr
+		if m.createEnd <= m.createStart {
+			m.createEnd = m.createStart + mpr
+		}
+		if m.createEnd > MaxCreateSpanDays*MinutesPerDay {
+			m.createEnd = MaxCreateSpanDays * MinutesPerDay
+		}
 		m.mode = ModeInput
 		m.isEdit = false
 		m.editIndex = -1
@@ -2054,9 +2230,12 @@ func (m Model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.inputBuffer = m.inputBuffer[:len(m.inputBuffer)-1]
 		}
 
+	case msg.String() == "ctrl+w":
+		m.inputBuffer = deletePreviousWord(m.inputBuffer)
+
 	default:
 		s := msg.String()
-		if len(s) == 1 || s == " " {
+		if len([]rune(s)) == 1 || s == " " {
 			m.inputBuffer += s
 		}
 	}
@@ -2104,13 +2283,36 @@ func (m Model) updateInputDesc(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.descBuffer = m.descBuffer[:len(m.descBuffer)-1]
 		}
 
+	case msg.String() == "ctrl+w":
+		m.descBuffer = deletePreviousWord(m.descBuffer)
+
 	default:
 		s := msg.String()
-		if len(s) == 1 || s == " " {
+		if len([]rune(s)) == 1 || s == " " {
 			m.descBuffer += s
 		}
 	}
 	return m, nil
+}
+
+func deletePreviousWord(s string) string {
+	r := []rune(s)
+	i := len(r)
+	for i > 0 && unicode.IsSpace(r[i-1]) {
+		i--
+	}
+	for i > 0 && !unicode.IsSpace(r[i-1]) {
+		i--
+	}
+	return string(r[:i])
+}
+
+func (m *Model) createFastStep() int {
+	step := m.jumpStep() * 4
+	if step < 60 {
+		step = 60
+	}
+	return step
 }
 
 // --- Input recurrence mode (choose recurrence for new event) ---
@@ -2181,10 +2383,10 @@ func (m Model) updateAdjust(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch {
 	case IsKey(msg, KeyJ):
-		m.moveAdjustBy(m.jumpStep())
+		m.moveAdjustBy(m.MinutesPerRow())
 
 	case IsKey(msg, KeyK):
-		m.moveAdjustBy(-m.jumpStep())
+		m.moveAdjustBy(-m.MinutesPerRow())
 
 	case IsKey(msg, KeyCtrlD):
 		mpr := m.MinutesPerRow()
@@ -2203,10 +2405,10 @@ func (m Model) updateAdjust(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.moveAdjustBy(-quarterPage)
 
 	case IsKey(msg, KeyShiftJ):
-		m.moveAdjustBy(1)
+		m.moveAdjustBy(m.MinutesPerRow())
 
 	case IsKey(msg, KeyShiftK):
-		m.moveAdjustBy(-1)
+		m.moveAdjustBy(-m.MinutesPerRow())
 
 	case IsKey(msg, KeyG):
 		m.gotoReturnMode = ModeAdjust
@@ -2656,62 +2858,54 @@ func (m Model) View() string {
 
 	// Detail view is fullscreen
 	if m.mode == ModeDetail {
-		statusBar := m.renderStatusBar()
-		return RenderDetail(&m) + "\n" + statusBar
+		return m.renderScreenWithStatus(RenderDetail(&m))
 	}
 
 	// Settings view is fullscreen
 	if m.mode == ModeSettings {
-		statusBar := m.renderStatusBar()
-		return RenderSettings(&m) + "\n" + statusBar
+		return m.renderScreenWithStatus(RenderSettings(&m))
 	}
 
 	// Edit menu is fullscreen
 	if m.mode == ModeEditMenu {
-		statusBar := m.renderStatusBar()
-		return RenderEditMenu(&m) + "\n" + statusBar
+		return m.renderScreenWithStatus(RenderEditMenu(&m))
 	}
 
 	if m.mode == ModeHelp {
-		return m.renderHelpView() + "\n" + m.renderStatusBar()
+		return m.renderScreenWithStatus(m.renderHelpView())
 	}
 
 	// Month view
 	if m.viewMode == ViewMonth {
-		monthGrid := RenderMonth(&m)
-		statusBar := m.renderStatusBar()
-		return monthGrid + "\n" + statusBar
+		return m.renderScreenWithStatus(RenderMonth(&m))
 	}
 
 	// Year view
 	if m.viewMode == ViewYear {
-		yearGrid := RenderYear(&m)
-		statusBar := m.renderStatusBar()
-		return yearGrid + "\n" + statusBar
+		return m.renderScreenWithStatus(RenderYear(&m))
 	}
 
 	grid := RenderGrid(&m)
-	statusBar := m.renderStatusBar()
 	promptStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(m.uiColor("prompt_fg", m.uiColor("accent", "39")))).Bold(true)
 	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(m.uiColor("hint_fg", "243")))
 
 	if m.mode == ModeInput {
 		label := "Event title: "
 		prompt := "\n" + promptStyle.Render(label) + m.inputBuffer + "█"
-		return grid + prompt + "\n" + statusBar
+		return m.renderScreenWithStatus(grid + prompt)
 	}
 
 	if m.mode == ModeInputDesc {
 		label := "Description (Enter to skip): "
 		prompt := "\n" + promptStyle.Render(label) + m.descBuffer + "█"
-		return grid + prompt + "\n" + statusBar
+		return m.renderScreenWithStatus(grid + prompt)
 	}
 
 	if m.mode == ModeInputRecurrence {
 		recLabel := RecurrenceLabel(m.createRecurrence)
 		prompt := "\n" + promptStyle.Render("Repeat: ") + recLabel + "  " +
 			hintStyle.Render("r: cycle  Enter: confirm  Esc: cancel")
-		return grid + prompt + "\n" + statusBar
+		return m.renderScreenWithStatus(grid + prompt)
 	}
 
 	if m.mode == ModeSearch {
@@ -2720,20 +2914,25 @@ func (m Model) View() string {
 		if len(m.searchMatches) > 0 {
 			matchInfo = fmt.Sprintf(" (%d matches)", len(m.searchMatches))
 		}
-		return grid + prompt + hintStyle.Render(matchInfo) + "\n" + statusBar
+		return m.renderScreenWithStatus(grid + prompt + hintStyle.Render(matchInfo))
 	}
 
 	if m.mode == ModeGoto {
 		prompt := "\n" + promptStyle.Render("Go to time: ") + m.gotoBuffer + "█"
-		return grid + prompt + "\n" + statusBar
+		return m.renderScreenWithStatus(grid + prompt)
 	}
 
 	if m.mode == ModeGotoDay {
 		prompt := "\n" + promptStyle.Render("Go to day: ") + m.gotoBuffer + "█"
-		return grid + prompt + "\n" + statusBar
+		return m.renderScreenWithStatus(grid + prompt)
 	}
 
-	return grid + "\n" + statusBar
+	return m.renderScreenWithStatus(grid)
+}
+
+func (m Model) renderScreenWithStatus(content string) string {
+	body := lipgloss.Place(m.width, m.height-1, lipgloss.Left, lipgloss.Top, content)
+	return body + "\n" + m.renderStatusBar()
 }
 
 type helpRow struct {
@@ -3014,7 +3213,7 @@ func (m Model) renderHelpView() string {
 
 	content := lipgloss.NewStyle().Width(contentWidth).Render(strings.Join(body, "\n"))
 	box := helpBoxStyle.Render(content)
-	return lipgloss.Place(m.width, m.height-2, lipgloss.Center, lipgloss.Top, box)
+	return lipgloss.NewStyle().Width(m.width).Align(lipgloss.Center).Render(box)
 }
 
 func (m Model) updateHelp(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

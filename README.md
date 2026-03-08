@@ -53,11 +53,11 @@ If you usually run the installed binary from `~/go/bin`, remember to run `go ins
 
 - Week, month, and year views
 - Vim-style navigation plus help overlay with live key rebinding
-- Multi-day events, including recurring multi-day events
+- Multi-day events, including recurring multi-day events and 24h+ all-day spans at the top of week view
 - Visual selection, copy, cut, paste, delete, and grouped move
 - Recurring move/delete flows with `o` = one occurrence and `a` = all occurrences
 - Search with persistent match navigation
-- In-app color customization for event color, event background, and UI accent
+- In-app color customization for event color, consecutive-event color, event background, and UI accent
 
 ## Views
 
@@ -81,7 +81,7 @@ Press `?` any time in the main UI to open the help panel. It shows the current b
 |-----|--------|
 | `h` / `l` | Previous / next day |
 | `j` / `k` | Move cursor down / up |
-| `J` / `K` | Move cursor down / up by exactly 1 minute |
+| `J` / `K` | Move cursor down / up by one visible row |
 | `H` / `L` | Previous / next overlapping event |
 | `Ctrl+D` / `Ctrl+U` | Jump quarter page down / up |
 | `Tab` | Cycle through overlapping events at cursor |
@@ -119,12 +119,14 @@ For recurring events:
 ### Create Flow
 
 1. Press `a` to start creating at cursor
-2. `j`/`k` to set duration, `Enter` to confirm
+2. `j`/`k` to set duration by visible row, `J`/`K` to fine-tune by 1 minute, `Ctrl+D`/`Ctrl+U` to resize faster, `Enter` to confirm
 3. Type title, `Enter`
 4. Type description, `Enter` (skippable via settings)
 5. `r`/`R` to cycle recurrence, `Enter` to save (skippable via settings)
 
 Create spans can cross midnight and multiple days.
+
+If a logical event is at least 24 hours long, it renders as a top all-day span in week view instead of as timed blocks in the grid.
 
 ### Search
 
@@ -165,7 +167,7 @@ Enter with `m` on any event. The event stays pinned to its visual column during 
 
 | Key | Action |
 |-----|--------|
-| `j` / `k` | Move event down / up by jump step |
+| `j` / `k` | Move event down / up by visible row |
 | `J` / `K` | Move event down / up by 1 minute |
 | `h` / `l` | Move event to previous / next day |
 | `g` | Jump move preview to a typed time |
@@ -223,7 +225,9 @@ Open with `S`. Navigate with `j`/`k`, change values with `h`/`l` or `Enter`.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
+| Default zoom | `30 min/row` | Default week-view zoom level |
 | Event color | `#1a5fb4` | Main border/accent color for events |
+| Consecutive event color | `#26a269` | Alternating border color for back-to-back event chains |
 | Accent color | `#00a8ff` | Main UI accent (`WEEK`, headers, help, prompts, etc.) |
 | Event background | `#1c1c2e` | Dark background fill for event blocks |
 | Show keybinding hints | Off | Show shortcut hints in the status bar and menus |
@@ -238,6 +242,8 @@ Color rows open an inline hex editor:
 - `Enter` saves
 - `Ctrl+R` resets to the default
 - `Esc` cancels
+
+Title and description input also support `Ctrl+W` to delete the previous word.
 
 ## Customization
 

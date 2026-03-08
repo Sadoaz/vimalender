@@ -74,19 +74,20 @@ var DefaultEventColors = []string{
 
 func DefaultUIColors() map[string]string {
 	return map[string]string{
-		"accent":           "#00a8ff",
-		"header_accent":    "#00a8ff",
-		"create_preview":   "#00a8ff",
-		"event_bg":         "#1c1c2e",
-		"status_bar_bg":    "236",
-		"status_bar_fg":    "255",
-		"hint_fg":          "243",
-		"warning_fg":       "111",
-		"help_border":      "#00a8ff",
-		"help_section":     "#00a8ff",
-		"help_selected_bg": "236",
-		"prompt_fg":        "39",
-		"now_fg":           "#ff0000",
+		"accent":            "#00a8ff",
+		"header_accent":     "#00a8ff",
+		"create_preview":    "#00a8ff",
+		"event_bg":          "#1c1c2e",
+		"status_bar_bg":     "236",
+		"status_bar_fg":     "255",
+		"hint_fg":           "243",
+		"warning_fg":        "111",
+		"help_border":       "#00a8ff",
+		"help_section":      "#00a8ff",
+		"help_selected_bg":  "236",
+		"prompt_fg":         "39",
+		"now_fg":            "#ff0000",
+		"consecutive_color": "#26a269",
 	}
 }
 
@@ -145,19 +146,20 @@ func DefaultKeybindingHelp() map[string]string {
 
 func DefaultUIColorHelp() map[string]string {
 	return map[string]string{
-		"accent":           "primary blue accent used by status tags and headings",
-		"header_accent":    "top calendar header accent color",
-		"create_preview":   "create-preview border color",
-		"event_bg":         "main event background fill color",
-		"status_bar_bg":    "bottom bar background",
-		"status_bar_fg":    "bottom bar text color",
-		"hint_fg":          "secondary hint text color",
-		"warning_fg":       "warning and error text color",
-		"help_border":      "help popup border color",
-		"help_section":     "help section heading color",
-		"help_selected_bg": "selected help row background",
-		"prompt_fg":        "input prompt accent color",
-		"now_fg":           "current time indicator color",
+		"accent":            "primary blue accent used by status tags and headings",
+		"header_accent":     "top calendar header accent color",
+		"create_preview":    "create-preview border color",
+		"event_bg":          "main event background fill color",
+		"status_bar_bg":     "bottom bar background",
+		"status_bar_fg":     "bottom bar text color",
+		"hint_fg":           "secondary hint text color",
+		"warning_fg":        "warning and error text color",
+		"help_border":       "help popup border color",
+		"help_section":      "help section heading color",
+		"help_selected_bg":  "selected help row background",
+		"prompt_fg":         "input prompt accent color",
+		"now_fg":            "current time indicator color",
+		"consecutive_color": "border color for back-to-back consecutive events",
 	}
 }
 
@@ -218,9 +220,17 @@ func LoadSettings() (Settings, string) {
 	if s.DayCount < 1 {
 		s.DayCount = 7
 	}
-	if s.ZoomLevel <= 0 {
+	if s.ZoomLevel <= 0 || s.ZoomLevel < MinZoomLevel || s.ZoomLevel > MaxPreciseZoomLevel {
 		s.ZoomLevel = DefaultZoomLevel
 	}
+	// Snap to nearest valid zoom level
+	best := ZoomLevels[0]
+	for _, level := range ZoomLevels {
+		if level <= s.ZoomLevel {
+			best = level
+		}
+	}
+	s.ZoomLevel = best
 	if s.JumpPercent < 1 || s.JumpPercent > 50 {
 		s.JumpPercent = 5
 	}

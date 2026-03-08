@@ -22,6 +22,21 @@ type settingsItem struct {
 func settingsItems() []settingsItem {
 	return []settingsItem{
 		{
+			label: "Default zoom",
+			display: func(m *Model) string {
+				return fmt.Sprintf("%d min/row", m.settings.ZoomLevel)
+			},
+			action: func(m *Model) {
+				cycleSettingsZoom(m, 1)
+			},
+			actionL: func(m *Model) {
+				cycleSettingsZoom(m, -1)
+			},
+			actionR: func(m *Model) {
+				cycleSettingsZoom(m, 1)
+			},
+		},
+		{
 			label: "Event color",
 			display: func(m *Model) string {
 				return m.settings.EventColor
@@ -41,6 +56,13 @@ func settingsItems() []settingsItem {
 				return m.settings.UIColors["event_bg"]
 			},
 			editKey: "event_bg",
+		},
+		{
+			label: "Consecutive event color",
+			display: func(m *Model) string {
+				return m.settings.UIColors["consecutive_color"]
+			},
+			editKey: "consecutive_color",
 		},
 		{
 			label: "Show keybinding hints",
@@ -110,6 +132,26 @@ func settingsItems() []settingsItem {
 	}
 }
 
+func cycleSettingsZoom(m *Model, dir int) {
+	idx := 0
+	for i, level := range ZoomLevels {
+		if level == m.settings.ZoomLevel {
+			idx = i
+			break
+		}
+	}
+	idx += dir
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(ZoomLevels) {
+		idx = len(ZoomLevels) - 1
+	}
+	m.settings.ZoomLevel = ZoomLevels[idx]
+	m.applyZoomLevel(m.settings.ZoomLevel)
+	m.saveSettings()
+}
+
 // updateSettings handles key events in the settings menu.
 func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	items := settingsItems()
@@ -137,6 +179,11 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.settings.UIColors = map[string]string{}
 				}
 				m.settings.UIColors["event_bg"] = value
+			case "consecutive_color":
+				if m.settings.UIColors == nil {
+					m.settings.UIColors = map[string]string{}
+				}
+				m.settings.UIColors["consecutive_color"] = value
 			}
 			m.saveSettings()
 			m.settingsEditActive = false
@@ -260,6 +307,8 @@ func currentSettingsEditValue(m *Model) string {
 		return m.settings.UIColors["accent"]
 	case "event_bg":
 		return m.settings.UIColors["event_bg"]
+	case "consecutive_color":
+		return m.settings.UIColors["consecutive_color"]
 	default:
 		return ""
 	}
@@ -276,6 +325,11 @@ func resetSettingsEditValue(m *Model) {
 			m.settings.UIColors = map[string]string{}
 		}
 		m.settings.UIColors["event_bg"] = DefaultUIColors()["event_bg"]
+	case "consecutive_color":
+		if m.settings.UIColors == nil {
+			m.settings.UIColors = map[string]string{}
+		}
+		m.settings.UIColors["consecutive_color"] = DefaultUIColors()["consecutive_color"]
 	}
 }
 
@@ -352,5 +406,5 @@ func RenderSettings(m *Model) string {
 
 	content := lipgloss.NewStyle().Width(contentWidth).Render(b.String())
 	box := boxStyle.Render(content)
-	return lipgloss.Place(m.width, m.height-2, lipgloss.Center, lipgloss.Top, box)
+	return lipgloss.NewStyle().Width(m.width).Align(lipgloss.Center).Render(box)
 }
