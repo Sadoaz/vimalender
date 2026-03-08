@@ -14,7 +14,11 @@ import (
 func (m Model) updateGoto(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case IsKey(msg, KeyEsc):
-		m.mode = ModeNavigate
+		m.mode = m.gotoReturnMode
+		if m.mode == 0 {
+			m.mode = ModeNavigate
+		}
+		m.gotoReturnMode = ModeNavigate
 		m.gotoBuffer = ""
 
 	case IsKey(msg, KeyEnter):
@@ -22,8 +26,13 @@ func (m Model) updateGoto(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if err != nil {
 			m.statusMsg = fmt.Sprintf("Invalid time: %s", m.gotoBuffer)
 		} else {
-			m.cursorMin = min
-			m.ensureCursorVisible()
+			if m.gotoReturnMode == ModeAdjust {
+				delta := min - m.cursorMin
+				m.moveAdjustBy(delta)
+			} else {
+				m.cursorMin = min
+				m.ensureCursorVisible()
+			}
 			// Center viewport on cursor
 			if m.zoomLevel != ZoomAuto {
 				vpHeight := m.viewportHeight()
@@ -34,7 +43,11 @@ func (m Model) updateGoto(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		m.mode = ModeNavigate
+		m.mode = m.gotoReturnMode
+		if m.mode == 0 {
+			m.mode = ModeNavigate
+		}
+		m.gotoReturnMode = ModeNavigate
 		m.gotoBuffer = ""
 
 	case msg.String() == "backspace":
@@ -55,7 +68,11 @@ func (m Model) updateGoto(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) updateGotoDay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case IsKey(msg, KeyEsc):
-		m.mode = ModeNavigate
+		m.mode = m.gotoReturnMode
+		if m.mode == 0 {
+			m.mode = ModeNavigate
+		}
+		m.gotoReturnMode = ModeNavigate
 		m.gotoBuffer = ""
 
 	case IsKey(msg, KeyEnter):
@@ -69,11 +86,20 @@ func (m Model) updateGotoDay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				day = lastDay
 			}
 			target := time.Date(cur.Year(), cur.Month(), day, 0, 0, 0, 0, cur.Location())
-			m.windowStart = target
-			m.cursorCol = 0
-			m.resetOverlapIndex()
+			if m.gotoReturnMode == ModeAdjust {
+				deltaDays := int(DateKey(target).Sub(DateKey(cur)).Hours() / 24)
+				m.moveAdjustBy(deltaDays * MinutesPerDay)
+			} else {
+				m.windowStart = target
+				m.cursorCol = 0
+				m.resetOverlapIndex()
+			}
 		}
-		m.mode = ModeNavigate
+		m.mode = m.gotoReturnMode
+		if m.mode == 0 {
+			m.mode = ModeNavigate
+		}
+		m.gotoReturnMode = ModeNavigate
 		m.gotoBuffer = ""
 
 	case msg.String() == "backspace":

@@ -35,6 +35,7 @@ func (m *Model) openEditor(date time.Time, index int) tea.Cmd {
 
 	// Write temp file
 	content := formatEventForEditor(ev)
+	notesLine := notesCursorLine(content)
 	tmpFile, err := os.CreateTemp("", "vimalender-*.txt")
 	if err != nil {
 		m.statusMsg = fmt.Sprintf("Editor error: %v", err)
@@ -54,7 +55,18 @@ func (m *Model) openEditor(date time.Time, index int) tea.Cmd {
 		editor = "vi"
 	}
 
-	c := exec.Command(editor, tmpPath)
+	editorFields := strings.Fields(editor)
+	if len(editorFields) == 0 {
+		editorFields = []string{"vi"}
+	}
+	cmdName := editorFields[0]
+	args := append([]string{}, editorFields[1:]...)
+	base := strings.ToLower(cmdName)
+	if strings.Contains(base, "vim") || strings.Contains(base, "vi") || strings.Contains(base, "nvim") || strings.Contains(base, "hx") || strings.Contains(base, "helix") {
+		args = append(args, fmt.Sprintf("+%d", notesLine))
+	}
+	args = append(args, tmpPath)
+	c := exec.Command(cmdName, args...)
 	return tea.ExecProcess(c, func(err error) tea.Msg {
 		defer os.Remove(tmpPath)
 		if err != nil {
@@ -76,6 +88,16 @@ func (m *Model) openEditor(date time.Time, index int) tea.Cmd {
 	})
 }
 
+func notesCursorLine(content string) int {
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		if line == "Notes:" {
+			return i + 3
+		}
+	}
+	return len(lines)
+}
+
 // formatEventForEditor creates the temp file content for editing.
 func formatEventForEditor(ev Event) string {
 	var sb strings.Builder
@@ -89,7 +111,18 @@ func formatEventForEditor(ev Event) string {
 	} else {
 		sb.WriteString("Until: \n")
 	}
+	sb.WriteString("\n")
+	sb.WriteString("# Edit the fields above using these formats:\n")
+	sb.WriteString("#   Title: free text\n")
+	sb.WriteString("#   Desc: free text\n")
+	sb.WriteString("#   Start: HH:MM\n")
+	sb.WriteString("#   End: HH:MM\n")
+	sb.WriteString("#   Repeat: None, Daily, Weekdays, Weekly, Biweekly, Monthly, Yearly\n")
+	sb.WriteString("#   Until: YYYY-MM-DD or leave blank\n")
+	sb.WriteString("#\n")
+	sb.WriteString("# Write longer notes under the --- separator below.\n")
 	sb.WriteString("---\n")
+	sb.WriteString("Notes:\n")
 	sb.WriteString(ev.Notes)
 	return sb.String()
 }
@@ -106,11 +139,15 @@ func parseEditorResult(path string) (title string, desc string, startMin, endMin
 	header := parts[0]
 	if len(parts) > 1 {
 		notes = strings.TrimRight(parts[1], "\n")
+		notes = strings.TrimPrefix(notes, "Notes:\n")
 	}
 
 	repeatLabel := ""
 	for _, line := range strings.Split(header, "\n") {
 		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
 		if strings.HasPrefix(line, "Title:") {
 			title = strings.TrimSpace(strings.TrimPrefix(line, "Title:"))
 		} else if strings.HasPrefix(line, "Desc:") {

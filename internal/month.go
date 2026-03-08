@@ -121,17 +121,19 @@ func RenderMonth(m *Model) string {
 	}
 
 	// Styles
+	accent := m.uiColor("accent", "39")
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	dayNumStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
-	todayNumStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
+	todayNumStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(accent)).Bold(true)
 	selectedBg := lipgloss.NewStyle().Background(lipgloss.Color("#1a3a5c")).Foreground(lipgloss.Color("255"))
-	eventDotStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+	eventDotStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(accent))
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(accent))
 	// Subtle highlight for the cursor's week row
 	weekHighlightBg := lipgloss.NewStyle().Background(lipgloss.Color("234"))
 	weekHighlightDim := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Background(lipgloss.Color("234"))
 	weekHighlightDay := lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Background(lipgloss.Color("234"))
-	weekHighlightToday := lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true).Background(lipgloss.Color("234"))
-	weekHighlightDot := lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Background(lipgloss.Color("234"))
+	weekHighlightToday := lipgloss.NewStyle().Foreground(lipgloss.Color(accent)).Bold(true).Background(lipgloss.Color("234"))
+	weekHighlightDot := lipgloss.NewStyle().Foreground(lipgloss.Color(accent)).Background(lipgloss.Color("234"))
 
 	// Determine which week row the cursor is in
 	cursorWeekRow := (cursor.Day() - 1 + wd) / 7
@@ -140,14 +142,14 @@ func RenderMonth(m *Model) string {
 
 	// Month/year header
 	header := fmt.Sprintf("%s %d", month.String(), year)
-	sb.WriteString(MonthHeaderStyle.Render(fmt.Sprintf("%-*s", m.width, centerText(header, m.width))))
+	sb.WriteString(headerStyle.Render(fmt.Sprintf("%-*s", m.width, centerText(header, m.width))))
 	sb.WriteString("\n")
 
 	// Day-of-week header row (with week number gutter)
 	sb.WriteString(fmt.Sprintf("%-*s", weekNumWidth, ""))
 	dayNames := []string{"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
 	for _, dn := range dayNames {
-		sb.WriteString(MonthHeaderStyle.Render(fmt.Sprintf("%-*s", cellWidth, centerText(dn, cellWidth))))
+		sb.WriteString(headerStyle.Render(fmt.Sprintf("%-*s", cellWidth, centerText(dn, cellWidth))))
 	}
 	sb.WriteString("\n")
 

@@ -40,10 +40,10 @@ var (
 			Background(lipgloss.Color("25")).
 			Foreground(lipgloss.Color("255"))
 
-	// Event in adjustment mode (fallback when borders are off)
+	// Event in adjustment mode (legacy fallback; active rendering is themed in grid.go)
 	AdjustEventStyle = lipgloss.NewStyle().
-				Background(lipgloss.Color("#2a1a0e")).
-				Foreground(lipgloss.Color("#f0d0a0")).
+				Background(lipgloss.Color("#1c1c2e")).
+				Foreground(lipgloss.Color("#ffffff")).
 				Bold(true)
 
 	// Status bar
@@ -60,13 +60,13 @@ var (
 
 	StatusCreateModeStyle = lipgloss.NewStyle().
 				Bold(true).
-				Background(lipgloss.Color("22")).
+				Background(lipgloss.Color("39")).
 				Foreground(lipgloss.Color("255")).
 				Padding(0, 1)
 
 	StatusAdjustModeStyle = lipgloss.NewStyle().
 				Bold(true).
-				Background(lipgloss.Color("#ff5f00")).
+				Background(lipgloss.Color("39")).
 				Foreground(lipgloss.Color("255")).
 				Padding(0, 1)
 
@@ -80,7 +80,7 @@ var (
 
 	// Warning/error messages
 	WarningStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("208"))
+			Foreground(lipgloss.Color("111"))
 
 	// Small terminal message
 	SmallTermStyle = lipgloss.NewStyle().
@@ -102,14 +102,21 @@ var (
 	// Search mode status bar
 	StatusSearchModeStyle = lipgloss.NewStyle().
 				Bold(true).
-				Background(lipgloss.Color("178")).
-				Foreground(lipgloss.Color("0")).
+				Background(lipgloss.Color("39")).
+				Foreground(lipgloss.Color("255")).
+				Padding(0, 1)
+
+	// Visual mode status bar
+	StatusVisualModeStyle = lipgloss.NewStyle().
+				Bold(true).
+				Background(lipgloss.Color("39")).
+				Foreground(lipgloss.Color("255")).
 				Padding(0, 1)
 
 	// Goto mode status bar
 	StatusGotoModeStyle = lipgloss.NewStyle().
 				Bold(true).
-				Background(lipgloss.Color("135")).
+				Background(lipgloss.Color("39")).
 				Foreground(lipgloss.Color("255")).
 				Padding(0, 1)
 
@@ -156,7 +163,7 @@ var (
 	// Settings mode style
 	StatusSettingsModeStyle = lipgloss.NewStyle().
 				Bold(true).
-				Background(lipgloss.Color("70")).
+				Background(lipgloss.Color("39")).
 				Foreground(lipgloss.Color("255")).
 				Padding(0, 1)
 

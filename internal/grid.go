@@ -16,6 +16,14 @@ type eventHit struct {
 	layout EventLayout
 }
 
+type createPreviewLayout struct {
+	layoutMap  map[int]EventLayout
+	previewIdx int
+	previewCol int
+	totalCols  int
+	hasPreview bool
+}
+
 // colWidthForIndex returns the width of the given day column.
 // The last column gets any remainder pixels so the grid fills the full terminal width.
 func colWidthForIndex(col, dayCount, availWidth int) int {
@@ -57,30 +65,32 @@ func RenderGrid(m *Model) string {
 			pinnedID = m.adjustEventID
 			pinnedCol = m.adjustCol
 		}
-		layouts[i] = m.store.LayoutEvents(date, pinnedID, pinnedCol)
-		dayEvents[i] = m.store.GetByDate(date)
+		dayEvents[i] = m.applyRecurringAdjustPreview(date, m.store.GetByDate(date))
+		if m.adjustRecurring {
+			layouts[i] = layoutEventsList(dayEvents[i], pinnedID, pinnedCol)
+		} else {
+			layouts[i] = m.store.LayoutEvents(date, pinnedID, pinnedCol)
+		}
 	}
 
-	// Precompute consistent column count for create preview
-	// (max TotalCol across all events overlapping the create range + 1 for preview)
-	createTotalCols := 0
-	if m.isCreating() && m.cursorCol >= 0 && m.cursorCol < m.dayCount {
-		maxExisting := 0
-		col := m.cursorCol
-		for i, ev := range dayEvents[col] {
-			if ev.StartMin < m.createEnd && ev.EndMin > m.createStart {
-				l := EventLayout{Col: 0, TotalCol: 1}
-				if layouts[col] != nil {
-					if ll, ok := layouts[col][i]; ok {
-						l = ll
-					}
-				}
-				if l.TotalCol > maxExisting {
-					maxExisting = l.TotalCol
-				}
+	createLayouts := make([]createPreviewLayout, m.dayCount)
+	if m.isCreating() {
+		for col := 0; col < m.dayCount; col++ {
+			startMin, endMin, ok := createRangeForCol(m, col)
+			if !ok {
+				continue
 			}
+			preview := Event{ID: "__create_preview__", Date: m.windowStart.AddDate(0, 0, col), StartMin: startMin, EndMin: endMin}
+			layoutMap, previewIdx := m.store.LayoutEventsWithPreview(preview.Date, preview, "", 0)
+			info := createPreviewLayout{layoutMap: layoutMap, previewIdx: previewIdx, hasPreview: true}
+			if l, ok := layoutMap[previewIdx]; ok {
+				info.previewCol = l.Col
+				info.totalCols = l.TotalCol
+			} else {
+				info.totalCols = 1
+			}
+			createLayouts[col] = info
 		}
-		createTotalCols = maxExisting + 1
 	}
 
 	// Compute "now" info for current time line
@@ -107,7 +117,7 @@ func RenderGrid(m *Model) string {
 			rowEndMin = MinutesPerDay
 		}
 
-		line := renderRow(m, rowStartMin, rowEndMin, availWidth, gutterWidth, layouts, dayEvents, createTotalCols, todayCol, nowMin)
+		line := renderRow(m, rowStartMin, rowEndMin, availWidth, gutterWidth, layouts, dayEvents, createLayouts, todayCol, nowMin)
 		rows = append(rows, line)
 	}
 
@@ -120,6 +130,11 @@ func renderHeaders(m *Model, availWidth, gutterWidth int) string {
 	_, week := m.windowStart.ISOWeek()
 	gutter := fmt.Sprintf("W%-*d", gutterWidth-1, week)
 	gutter = TimeGutterStyle.Render(fmt.Sprintf("%-*s", gutterWidth, gutter))
+	accent := m.uiColor("header_accent", m.uiColor("accent", "39"))
+	selectedStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(accent)).Align(lipgloss.Center)
+	todayStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(accent)).Underline(true).Align(lipgloss.Center)
+	selectedTodayStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(accent)).Underline(true).Align(lipgloss.Center)
+	defaultStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).Align(lipgloss.Center)
 	today := DateKey(time.Now())
 	var cols []string
 	for i := 0; i < m.dayCount; i++ {
@@ -131,13 +146,13 @@ func renderHeaders(m *Model, availWidth, gutterWidth int) string {
 		isCursor := i == m.cursorCol
 		switch {
 		case isToday && isCursor:
-			cols = append(cols, SelectedTodayColumnHeaderStyle.Render(padded))
+			cols = append(cols, selectedTodayStyle.Render(padded))
 		case isToday:
-			cols = append(cols, TodayColumnHeaderStyle.Render(padded))
+			cols = append(cols, todayStyle.Render(padded))
 		case isCursor:
-			cols = append(cols, SelectedColumnHeaderStyle.Render(padded))
+			cols = append(cols, selectedStyle.Render(padded))
 		default:
-			cols = append(cols, ColumnHeaderStyle.Render(padded))
+			cols = append(cols, defaultStyle.Render(padded))
 		}
 	}
 	return gutter + strings.Join(cols, "")
@@ -145,7 +160,7 @@ func renderHeaders(m *Model, availWidth, gutterWidth int) string {
 
 // renderRow renders one display row (covering rowStartMin to rowEndMin) across day columns.
 func renderRow(m *Model, rowStartMin, rowEndMin, availWidth, gutterWidth int,
-	layouts []map[int]EventLayout, dayEvents [][]Event, createTotalCols int,
+	layouts []map[int]EventLayout, dayEvents [][]Event, createLayouts []createPreviewLayout,
 	todayCol, nowMin int) string {
 
 	// Determine if the current time line falls in this row
@@ -165,16 +180,17 @@ func renderRow(m *Model, rowStartMin, rowEndMin, availWidth, gutterWidth int,
 			cw := colWidthForIndex(col, m.dayCount, availWidth)
 			// Check if any events or cursor overlap this row in this column
 			hasEvent := false
+			mpr := m.MinutesPerRow()
 			for _, ev := range dayEvents[col] {
-				if ev.StartMin < rowEndMin && ev.EndMin > rowStartMin {
+				if eventOverlapsVisualRow(ev, rowStartMin, rowEndMin, mpr) {
 					hasEvent = true
 					break
 				}
 			}
 			isCursorHere := col == m.cursorCol && m.cursorMin >= rowStartMin && m.cursorMin < rowEndMin
 			if hasEvent {
-				// Event present: render normally, the red gutter time signals "now"
-				cell := renderCell(m, col, rowStartMin, rowEndMin, cw, layouts[col], dayEvents[col], createTotalCols)
+				// Event present: render the row with the now-line over the event cell
+				cell := renderCell(m, col, rowStartMin, rowEndMin, cw, layouts[col], dayEvents[col], createLayouts[col], true)
 				cols = append(cols, cell)
 			} else if isCursorHere {
 				// Cursor on now-row: show cursor on red line background
@@ -197,7 +213,7 @@ func renderRow(m *Model, rowStartMin, rowEndMin, availWidth, gutterWidth int,
 	var cols []string
 	for col := 0; col < m.dayCount; col++ {
 		cw := colWidthForIndex(col, m.dayCount, availWidth)
-		cell := renderCell(m, col, rowStartMin, rowEndMin, cw, layouts[col], dayEvents[col], createTotalCols)
+		cell := renderCell(m, col, rowStartMin, rowEndMin, cw, layouts[col], dayEvents[col], createLayouts[col], false)
 		cols = append(cols, cell)
 	}
 
@@ -207,6 +223,75 @@ func renderRow(m *Model, rowStartMin, rowEndMin, availWidth, gutterWidth int,
 // nowLine renders a red horizontal line of the given width for the current time indicator.
 func nowLine(width int) string {
 	return NowLineStyle.Render(strings.Repeat("─", width))
+}
+
+func createRangeForCol(m *Model, col int) (int, int, bool) {
+	if !m.isCreating() {
+		return 0, 0, false
+	}
+	dayOffset := col - m.cursorCol
+	if dayOffset < 0 {
+		return 0, 0, false
+	}
+	segmentStart := 0
+	if dayOffset == 0 {
+		segmentStart = m.createStart
+	}
+	segmentEnd := m.createEnd - dayOffset*MinutesPerDay
+	if segmentEnd <= segmentStart {
+		return 0, 0, false
+	}
+	if segmentEnd > MinutesPerDay {
+		segmentEnd = MinutesPerDay
+	}
+	return segmentStart, segmentEnd, true
+}
+
+func fillEmpty(width int, showNowLine bool) string {
+	if width <= 0 {
+		return ""
+	}
+	if showNowLine {
+		return nowLine(width)
+	}
+	return fmt.Sprintf("%-*s", width, "")
+}
+
+func fillEmptySelected(width int, showNowLine, selected bool) string {
+	if selected {
+		if showNowLine {
+			return nowLine(width)
+		}
+		return CursorStyle.Render(fmt.Sprintf("%-*s", width, ""))
+	}
+	return fillEmpty(width, showNowLine)
+}
+
+func isVisualCellSelected(m *Model, col, rowStartMin, rowEndMin int) bool {
+	if m.mode != ModeVisual {
+		return false
+	}
+	startDate, endDate, minMin, maxMin, ok := m.visualSelectionBounds()
+	if !ok {
+		return false
+	}
+	date := DateKey(m.windowStart.AddDate(0, 0, col))
+	if date.Before(startDate) || date.After(endDate) {
+		return false
+	}
+	return rowStartMin < maxMin && rowEndMin > minMin
+}
+
+func eventOverlapsVisualRow(ev Event, rowStartMin, rowEndMin, minutesPerRow int) bool {
+	// Leave a 1-row visual gap at the bottom of events for spacing.
+	// Events must span at least 2 rows (>minutesPerRow minutes) to get a gap,
+	// otherwise the entire event would disappear.
+	visualEnd := ev.EndMin
+	rows := (ev.EndMin - ev.StartMin + minutesPerRow - 1) / minutesPerRow
+	if rows >= 2 {
+		visualEnd -= minutesPerRow
+	}
+	return ev.StartMin < rowEndMin && visualEnd > rowStartMin
 }
 
 // isSearchMatch checks if the event at the given date and index is a search match.
@@ -248,36 +333,85 @@ func isCurrentSearchMatch(m *Model, col, idx int) bool {
 	return match.EventID == events[idx].ID && DateKey(match.Date).Equal(DateKey(date))
 }
 
+func isVisualSelected(m *Model, col, idx int) bool {
+	if m.mode != ModeVisual {
+		return false
+	}
+	date := m.windowStart.AddDate(0, 0, col)
+	events := m.store.GetByDate(date)
+	if idx < 0 || idx >= len(events) {
+		return false
+	}
+	return m.visualSelectedKeys()[m.selectionKeyForEvent(events[idx])]
+}
+
+func isAdjustSelected(m *Model, col, idx int) bool {
+	if m.mode != ModeAdjust {
+		return false
+	}
+	date := m.windowStart.AddDate(0, 0, col)
+	events := m.store.GetByDate(date)
+	if idx < 0 || idx >= len(events) {
+		return false
+	}
+	if len(m.adjustEventIDs) == 0 {
+		return events[idx].ID == m.adjustEventID
+	}
+	id := events[idx].ID
+	for _, selectedID := range m.adjustEventIDs {
+		if selectedID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func isAdjustEventSelected(m *Model, ev Event) bool {
+	if m.mode != ModeAdjust {
+		return false
+	}
+	if m.adjustRecurringSelection {
+		return strings.HasPrefix(ev.ID, "__selection_preview__")
+	}
+	if m.adjustRecurring {
+		return ev.GroupID != "" && ev.GroupID == m.adjustPreviewGroupID
+	}
+	if len(m.adjustEventIDs) > 0 {
+		for _, selectedID := range m.adjustEventIDs {
+			if selectedID == ev.ID {
+				return true
+			}
+		}
+		return false
+	}
+	return ev.ID == m.adjustEventID
+}
+
 // renderCell renders a single cell for one day-column at a given row time range.
 func renderCell(m *Model, col, rowStartMin, rowEndMin, colWidth int,
-	layout map[int]EventLayout, events []Event, createTotalCols int) string {
+	layout map[int]EventLayout, events []Event, createLayout createPreviewLayout, showNowLine bool) string {
 
 	isCursorRow := col == m.cursorCol && m.cursorMin >= rowStartMin && m.cursorMin < rowEndMin
+	isVisualCell := isVisualCellSelected(m, col, rowStartMin, rowEndMin)
 
 	// Check create preview
 	inCreatePreview := false
-	if m.isCreating() && col == m.cursorCol {
-		// Preview overlaps this row if ranges intersect
-		if m.createStart < rowEndMin && m.createEnd > rowStartMin {
-			inCreatePreview = true
-		}
+	createStartMin, createEndMin, ok := createRangeForCol(m, col)
+	if ok && createStartMin < rowEndMin && createEndMin > rowStartMin {
+		inCreatePreview = true
 	}
 
 	// Find all events overlapping this row's time range
 	var hits []eventHit
 	mpr := m.MinutesPerRow()
 	for i, ev := range events {
-		// Leave a 1-row visual gap at the bottom of events for spacing.
-		// Events must span at least 2 rows (>mpr minutes) to get a gap,
-		// otherwise the entire event would disappear.
-		visualEnd := ev.EndMin
-		rows := (ev.EndMin - ev.StartMin + mpr - 1) / mpr
-		if rows >= 2 {
-			visualEnd -= mpr
-		}
-		if ev.StartMin < rowEndMin && visualEnd > rowStartMin {
+		if eventOverlapsVisualRow(ev, rowStartMin, rowEndMin, mpr) {
 			l := EventLayout{Col: 0, TotalCol: 1}
-			if layout != nil {
+			if createLayout.layoutMap != nil {
+				if ll, ok := createLayout.layoutMap[i]; ok {
+					l = ll
+				}
+			} else if layout != nil {
 				if ll, ok := layout[i]; ok {
 					l = ll
 				}
@@ -287,42 +421,47 @@ func renderCell(m *Model, col, rowStartMin, rowEndMin, colWidth int,
 	}
 
 	if inCreatePreview && len(hits) == 0 {
-		label := ""
-		if rowStartMin <= m.createStart && m.createStart < rowEndMin {
-			if m.mode == ModeInput && m.inputBuffer != "" {
-				label = m.inputBuffer
-			} else {
-				label = fmt.Sprintf("%s-%s", MinToTime(m.createStart), MinToTime(m.createEnd))
-			}
-		}
-		if createTotalCols > 1 {
+		label := createPreviewLabel(m, col, rowStartMin, rowEndMin)
+		if createLayout.totalCols > 1 {
 			// Maintain consistent column layout even in rows with no events
-			subWidth := colWidth / createTotalCols
+			subWidth := colWidth / createLayout.totalCols
 			if subWidth < 3 {
 				subWidth = 3
 			}
-			lastSubWidth := colWidth - subWidth*(createTotalCols-1)
+			lastSubWidth := colWidth - subWidth*(createLayout.totalCols-1)
 			if lastSubWidth < subWidth {
 				lastSubWidth = subWidth
 			}
-			// Empty space for existing event columns
-			prefix := fmt.Sprintf("%-*s", colWidth-lastSubWidth, "")
-			// Preview in last column
-			label = truncLabel(label, lastSubWidth-1)
-			return prefix + renderCreatePreviewContent(m, label, lastSubWidth)
+			previewWidth := subWidth
+			if createLayout.previewCol == createLayout.totalCols-1 {
+				previewWidth = lastSubWidth
+			}
+			prefix := fillEmptySelected(createLayout.previewCol*subWidth, showNowLine, isVisualCell)
+			label = truncLabel(label, previewWidth-1)
+			if showNowLine {
+				content := renderNowLineCreatePreviewContent(m, previewWidth)
+				suffix := fillEmptySelected(colWidth-createLayout.previewCol*subWidth-previewWidth, showNowLine, isVisualCell)
+				return prefix + content + suffix
+			}
+			content := renderCreatePreviewContent(m, label, previewWidth)
+			suffix := fillEmptySelected(colWidth-createLayout.previewCol*subWidth-previewWidth, showNowLine, isVisualCell)
+			return prefix + content + suffix
 		}
 		label = truncLabel(label, colWidth-1)
+		if showNowLine {
+			return renderNowLineCreatePreviewContent(m, colWidth)
+		}
 		return renderCreatePreviewContent(m, label, colWidth)
 	}
 
 	if inCreatePreview && len(hits) > 0 {
 		// Create preview alongside existing events: split column
-		return renderCreateWithEvents(m, col, hits, rowStartMin, rowEndMin, colWidth, createTotalCols)
+		return renderCreateWithEvents(m, col, hits, rowStartMin, rowEndMin, colWidth, createLayout, showNowLine)
 	}
 
 	if len(hits) == 0 {
 		// Empty cell
-		content := fmt.Sprintf("%-*s", colWidth, "")
+		content := fillEmptySelected(colWidth, showNowLine, isVisualCell)
 		if isCursorRow {
 			marker := " \u25ba"
 			content = fmt.Sprintf("%-*s", colWidth, marker)
@@ -335,11 +474,11 @@ func renderCell(m *Model, col, rowStartMin, rowEndMin, colWidth int,
 	// for events that overlap the create range, so their columns don't jump
 	// between normal TotalCol and createTotalCols widths across rows.
 	overrideCols := 0
-	if m.isCreating() && col == m.cursorCol && createTotalCols > 1 {
+	if inCreatePreview && createLayout.totalCols > 1 {
 		// Check if any hit event overlaps the create time range
 		for _, h := range hits {
-			if h.ev.StartMin < m.createEnd && h.ev.EndMin > m.createStart {
-				overrideCols = createTotalCols
+			if h.ev.StartMin < createEndMin && h.ev.EndMin > createStartMin {
+				overrideCols = createLayout.totalCols
 				break
 			}
 		}
@@ -347,16 +486,17 @@ func renderCell(m *Model, col, rowStartMin, rowEndMin, colWidth int,
 
 	if len(hits) == 1 {
 		return renderSingleEvent(m, col, hits[0].idx, hits[0].ev, hits[0].layout,
-			rowStartMin, rowEndMin, colWidth, isCursorRow, overrideCols)
+			rowStartMin, rowEndMin, colWidth, isCursorRow, overrideCols, showNowLine)
 	}
 
 	// Multiple overlapping events: render side-by-side in sub-columns
-	return renderMultiEvents(m, col, hits, rowStartMin, rowEndMin, colWidth, isCursorRow, overrideCols)
+	return renderMultiEvents(m, col, hits, rowStartMin, rowEndMin, colWidth, isCursorRow, overrideCols, showNowLine)
 }
 
 // renderMultiEvents renders multiple overlapping events side-by-side in sub-columns.
 func renderMultiEvents(m *Model, col int, hits []eventHit,
-	rowStartMin, rowEndMin, colWidth int, isCursorRow bool, overrideTotalCols int) string {
+	rowStartMin, rowEndMin, colWidth int, isCursorRow bool, overrideTotalCols int, showNowLine bool) string {
+	isVisualCell := isVisualCellSelected(m, col, rowStartMin, rowEndMin)
 	totalCols := 1
 	for _, h := range hits {
 		if h.layout.TotalCol > totalCols {
@@ -381,7 +521,7 @@ func renderMultiEvents(m *Model, col int, hits []eventHit,
 	// Check for adjust mode
 	isAdjusting := false
 	for _, h := range hits {
-		if m.mode == ModeAdjust && col == m.cursorCol && h.idx == m.adjustIndex {
+		if isAdjustEventSelected(m, h.ev) {
 			isAdjusting = true
 		}
 	}
@@ -393,7 +533,7 @@ func renderMultiEvents(m *Model, col int, hits []eventHit,
 			if i == totalCols-1 {
 				w = lastSubWidth
 			}
-			adjCols[i] = fmt.Sprintf("%-*s", w, "")
+			adjCols[i] = fillEmptySelected(w, showNowLine, isVisualCell)
 		}
 		for _, h := range hits {
 			c := h.layout.Col
@@ -404,13 +544,21 @@ func renderMultiEvents(m *Model, col int, hits []eventHit,
 			if c == totalCols-1 {
 				w = lastSubWidth
 			}
-			label := eventLabel(m, h.ev, rowStartMin, rowEndMin)
+			label := eventLabel(m, h.ev, rowStartMin, rowEndMin, w-borderChars, false)
 			pos := getEventRowPos(m, h.ev, rowStartMin, rowEndMin)
-			if h.idx == m.adjustIndex {
-				adjCols[c] = renderAdjustContent(m, truncLabel(label, w-borderChars), w, pos)
+			if isAdjustEventSelected(m, h.ev) {
+				if showNowLine {
+					adjCols[c] = renderNowLineAdjustContent(m, w, pos)
+				} else {
+					adjCols[c] = renderAdjustContent(m, label, w, pos, rowStartMin)
+				}
 			} else {
 				style := eventColorStyle(m, h.idx)
-				adjCols[c] = renderEventContent(m, h.idx, truncLabel(label, w-borderChars), w, style, true, pos)
+				if showNowLine {
+					adjCols[c] = renderNowLineEventContent(m, h.idx, w, pos)
+				} else {
+					adjCols[c] = renderEventContent(m, h.idx, label, w, style, true, pos, rowStartMin)
+				}
 			}
 		}
 		return strings.Join(adjCols, "")
@@ -434,7 +582,7 @@ func renderMultiEvents(m *Model, col int, hits []eventHit,
 		if i == totalCols-1 {
 			w = lastSubWidth
 		}
-		subCols[i] = fmt.Sprintf("%-*s", w, "")
+		subCols[i] = fillEmptySelected(w, showNowLine, isVisualCell)
 	}
 
 	for _, h := range hits {
@@ -446,21 +594,44 @@ func renderMultiEvents(m *Model, col int, hits []eventHit,
 		if c == totalCols-1 {
 			w = lastSubWidth
 		}
-		label := eventLabel(m, h.ev, rowStartMin, rowEndMin)
+		label := eventLabel(m, h.ev, rowStartMin, rowEndMin, w-borderChars, false)
 		pos := getEventRowPos(m, h.ev, rowStartMin, rowEndMin)
 
 		isSearchHit := isSearchMatch(m, col, h.idx)
 		isCurrentMatch := isCurrentSearchMatch(m, col, h.idx)
+		isVisualHit := isVisualSelected(m, col, h.idx)
 
 		if isCurrentMatch {
-			subCols[c] = renderSearchSelectedContent(m, h.idx, truncLabel(label, w-borderChars), w, pos)
+			if showNowLine {
+				subCols[c] = renderNowLineSearchSelectedContent(m, h.idx, w, pos)
+			} else {
+				subCols[c] = renderSearchSelectedContent(m, h.idx, label, w, pos)
+			}
+		} else if isVisualHit {
+			if showNowLine {
+				subCols[c] = renderNowLineCursorContent(m, h.idx, w, pos)
+			} else {
+				subCols[c] = renderCursorContent(m, h.idx, label, w, pos, rowStartMin)
+			}
 		} else if isCursorRow && h.idx == selectedIdx {
-			subCols[c] = renderCursorContent(m, h.idx, truncLabel(label, w-borderChars), w, pos)
+			if showNowLine {
+				subCols[c] = renderNowLineCursorContent(m, h.idx, w, pos)
+			} else {
+				subCols[c] = renderCursorContent(m, h.idx, label, w, pos, rowStartMin)
+			}
 		} else if isSearchHit {
-			subCols[c] = renderSearchContent(m, h.idx, truncLabel(label, w-borderChars), w, pos)
+			if showNowLine {
+				subCols[c] = renderNowLineSearchContent(m, h.idx, w, pos)
+			} else {
+				subCols[c] = renderSearchContent(m, h.idx, label, w, pos)
+			}
 		} else {
 			style := eventColorStyle(m, h.idx)
-			subCols[c] = renderEventContent(m, h.idx, truncLabel(label, w-borderChars), w, style, true, pos)
+			if showNowLine {
+				subCols[c] = renderNowLineEventContent(m, h.idx, w, pos)
+			} else {
+				subCols[c] = renderEventContent(m, h.idx, label, w, style, true, pos, rowStartMin)
+			}
 		}
 	}
 
@@ -469,13 +640,14 @@ func renderMultiEvents(m *Model, col int, hits []eventHit,
 
 // renderCreateWithEvents renders create preview alongside existing events.
 func renderCreateWithEvents(m *Model, col int, hits []eventHit,
-	rowStartMin, rowEndMin, colWidth, createTotalCols int) string {
+	rowStartMin, rowEndMin, colWidth int, createLayout createPreviewLayout, showNowLine bool) string {
+	isVisualCell := isVisualCellSelected(m, col, rowStartMin, rowEndMin)
 	// Use the precomputed consistent total columns count
-	totalCols := createTotalCols
+	totalCols := createLayout.totalCols
 	if totalCols < 2 {
 		totalCols = 2 // at least 1 event column + 1 preview column
 	}
-	existingCols := totalCols - 1
+	previewCol := createLayout.previewCol
 
 	subWidth := colWidth / totalCols
 	if subWidth < 3 {
@@ -486,11 +658,6 @@ func renderCreateWithEvents(m *Model, col int, hits []eventHit,
 		lastSubWidth = subWidth
 	}
 
-	// Sort hits by layout column
-	sort.Slice(hits, func(a, b int) bool {
-		return hits[a].layout.Col < hits[b].layout.Col
-	})
-
 	// Build sub-columns (initialize to empty)
 	subCols := make([]string, totalCols)
 	for i := range subCols {
@@ -498,48 +665,55 @@ func renderCreateWithEvents(m *Model, col int, hits []eventHit,
 		if i == totalCols-1 {
 			w = lastSubWidth
 		}
-		subCols[i] = fmt.Sprintf("%-*s", w, "")
+		subCols[i] = fillEmptySelected(w, showNowLine, isVisualCell)
 	}
 
-	// Render existing events in their sub-columns
+	// Render existing events in their preview-layout sub-columns.
 	for _, h := range hits {
-		c := h.layout.Col
-		if c < 0 || c >= existingCols {
+		mapped, ok := createLayout.layoutMap[h.idx]
+		if !ok {
+			continue
+		}
+		c := mapped.Col
+		if c < 0 || c >= totalCols || c == previewCol {
 			continue
 		}
 		w := subWidth
 		if c == totalCols-1 {
 			w = lastSubWidth
 		}
-		label := eventLabel(m, h.ev, rowStartMin, rowEndMin)
-		style := eventColorStyle(m, h.idx)
+		label := eventLabel(m, h.ev, rowStartMin, rowEndMin, w-1, false)
 		pos := getEventRowPos(m, h.ev, rowStartMin, rowEndMin)
-		subCols[c] = renderEventContent(m, h.idx, truncLabel(label, w-1), w, style, true, pos)
+		if showNowLine {
+			subCols[c] = renderNowLineEventContent(m, h.idx, w, pos)
+		} else {
+			style := eventColorStyle(m, h.idx)
+			subCols[c] = renderEventContent(m, h.idx, label, w, style, true, pos, rowStartMin)
+		}
 	}
 
 	// Create preview in the last sub-column
-	w := lastSubWidth
-	previewLabel := ""
-	if rowStartMin <= m.createStart && m.createStart < rowEndMin {
-		if m.mode == ModeInput && m.inputBuffer != "" {
-			previewLabel = m.inputBuffer
-		} else {
-			previewLabel = fmt.Sprintf("%s-%s", MinToTime(m.createStart), MinToTime(m.createEnd))
-		}
-		previewLabel = truncLabel(previewLabel, w-1)
+	w := subWidth
+	if previewCol == totalCols-1 {
+		w = lastSubWidth
 	}
-	subCols[totalCols-1] = renderCreatePreviewContent(m, previewLabel, w)
+	previewLabel := truncLabel(createPreviewLabel(m, col, rowStartMin, rowEndMin), w-1)
+	if showNowLine {
+		subCols[previewCol] = renderNowLineCreatePreviewContent(m, w)
+	} else {
+		subCols[previewCol] = renderCreatePreviewContent(m, previewLabel, w)
+	}
 
 	return strings.Join(subCols, "")
 }
 
 // eventColorStyle returns a style for an event using the first color in the palette.
 func eventColorStyle(m *Model, idx int) lipgloss.Style {
-	colors := m.settings.EventColors
-	if len(colors) == 0 {
-		return EventBlockStyle
+	_ = idx
+	bg := m.settings.EventColor
+	if bg == "" {
+		bg = DefaultEventColor
 	}
-	bg := colors[0]
 	return lipgloss.NewStyle().
 		Background(lipgloss.Color(bg)).
 		Foreground(lipgloss.Color("#ffffff"))
@@ -547,11 +721,11 @@ func eventColorStyle(m *Model, idx int) lipgloss.Style {
 
 // eventColor returns the hex color for an event.
 func eventColor(m *Model, idx int) string {
-	colors := m.settings.EventColors
-	if len(colors) == 0 {
-		return "#005fd7"
+	_ = idx
+	if m.settings.EventColor != "" {
+		return m.settings.EventColor
 	}
-	return colors[0]
+	return DefaultEventColor
 }
 
 // EventRowPos indicates where a row falls within an event's visual span.
@@ -604,8 +778,16 @@ func borderBarChar(m *Model, pos EventRowPos) string {
 
 // renderBorderedContent renders content with left bar and body text.
 // For bottom rows with round borders, fills with horizontal lines for visual separation.
-func renderBorderedContent(m *Model, idx int, text string, width int, bgColor, fgColor string, pos EventRowPos) string {
+func renderBorderedContent(m *Model, idx int, text string, width int, bgColor, fgColor string, pos EventRowPos, rowStartMin int) string {
 	color := eventColor(m, idx)
+	if pos == EventRowSingle && bgColor == eventBGColor(m) {
+		mpr := m.MinutesPerRow()
+		if mpr > 0 && ((rowStartMin/mpr)%2 == 1) {
+			bgColor = "#2a2a42"
+		} else {
+			bgColor = "#202038"
+		}
+	}
 	barStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color(color)).
 		Background(lipgloss.Color(bgColor))
@@ -623,20 +805,59 @@ func renderBorderedContent(m *Model, idx int, text string, width int, bgColor, f
 	return bar + body
 }
 
+func eventBGColor(m *Model) string {
+	return m.uiColor("event_bg", "#1c1c2e")
+}
+
 // renderEventContent renders event text with optional left color bar.
 // When borders are enabled, renders bordered content with dim background.
 // When disabled, renders with full event color background.
-func renderEventContent(m *Model, idx int, text string, width int, style lipgloss.Style, useBorder bool, pos EventRowPos) string {
+func renderEventContent(m *Model, idx int, text string, width int, style lipgloss.Style, useBorder bool, pos EventRowPos, rowStartMin int) string {
 	if !useBorder || !m.settings.ShowBorders || width < 2 {
 		return style.Render(padRight(text, width))
 	}
-	return renderBorderedContent(m, idx, text, width, "#1c1c2e", "#e0e0e0", pos)
+	return renderBorderedContent(m, idx, text, width, eventBGColor(m), "#e0e0e0", pos, rowStartMin)
+}
+
+func renderNowLineBox(m *Model, barColor, bgColor string, width int, barChar string) string {
+	_ = m
+	_ = barColor
+	_ = bgColor
+	_ = barChar
+	if width <= 0 {
+		return ""
+	}
+	return nowLine(width)
+}
+
+func renderNowLineEventContent(m *Model, idx int, width int, pos EventRowPos) string {
+	return renderNowLineBox(m, eventColor(m, idx), eventBGColor(m), width, borderBarChar(m, pos))
+}
+
+func renderNowLineCursorContent(m *Model, idx int, width int, pos EventRowPos) string {
+	return renderNowLineBox(m, eventColor(m, idx), "#2a2a3e", width, borderBarChar(m, pos))
+}
+
+func renderNowLineSearchContent(m *Model, _ int, width int, pos EventRowPos) string {
+	return renderNowLineBox(m, "#ffffff", eventBGColor(m), width, borderBarChar(m, pos))
+}
+
+func renderNowLineSearchSelectedContent(m *Model, _ int, width int, pos EventRowPos) string {
+	return renderNowLineBox(m, "#ffd700", "#3a3520", width, borderBarChar(m, pos))
+}
+
+func renderNowLineAdjustContent(m *Model, width int, pos EventRowPos) string {
+	return renderNowLineBox(m, m.uiColor("accent", eventColor(m, 0)), eventBGColor(m), width, borderBarChar(m, pos))
+}
+
+func renderNowLineCreatePreviewContent(m *Model, width int) string {
+	return renderNowLineBox(m, m.uiColor("create_preview", m.uiColor("accent", "#00a8ff")), eventBGColor(m), width, "▎")
 }
 
 // renderCursorContent renders an event on the cursor row with a subtle grey highlight.
-func renderCursorContent(m *Model, idx int, text string, width int, pos EventRowPos) string {
+func renderCursorContent(m *Model, idx int, text string, width int, pos EventRowPos, rowStartMin int) string {
 	if m.settings.ShowBorders && width >= 2 {
-		return renderBorderedContent(m, idx, text, width, "#2a2a3e", "#ffffff", pos)
+		return renderBorderedContent(m, idx, text, width, "#2a2a3e", "#ffffff", pos, rowStartMin)
 	}
 	style := lipgloss.NewStyle().
 		Background(lipgloss.Color("#2a2a3e")).
@@ -649,10 +870,10 @@ func renderSearchContent(m *Model, idx int, text string, width int, pos EventRow
 	if m.settings.ShowBorders && width >= 2 {
 		barStyle := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#ffffff")).
-			Background(lipgloss.Color("#1c1c2e")).
+			Background(lipgloss.Color(eventBGColor(m))).
 			Bold(true)
 		bodyStyle := lipgloss.NewStyle().
-			Background(lipgloss.Color("#1c1c2e")).
+			Background(lipgloss.Color(eventBGColor(m))).
 			Foreground(lipgloss.Color("#e0e0e0")).
 			Bold(true)
 		bar := barStyle.Render(borderBarChar(m, pos))
@@ -687,35 +908,47 @@ func renderSearchSelectedContent(m *Model, idx int, text string, width int, pos 
 	return style.Render(padRight(text, width))
 }
 
-// renderAdjustContent renders an event in adjust mode with orange left bar and dim bg.
-func renderAdjustContent(m *Model, text string, width int, pos EventRowPos) string {
-	adjustColor := "#ff5f00"
+// renderAdjustContent renders an event in move mode with themed accent styling.
+func renderAdjustContent(m *Model, text string, width int, pos EventRowPos, rowStartMin int) string {
+	adjustColor := m.uiColor("accent", eventColor(m, 0))
+	bgColor := eventBGColor(m)
+	if pos == EventRowSingle {
+		mpr := m.MinutesPerRow()
+		if mpr > 0 && ((rowStartMin/mpr)%2 == 1) {
+			bgColor = "#2a2a42"
+		} else {
+			bgColor = "#202038"
+		}
+	}
 	if m.settings.ShowBorders && width >= 2 {
 		barStyle := lipgloss.NewStyle().
 			Foreground(lipgloss.Color(adjustColor)).
-			Background(lipgloss.Color("#2a1a0e"))
+			Background(lipgloss.Color(bgColor))
 		bodyStyle := lipgloss.NewStyle().
-			Background(lipgloss.Color("#2a1a0e")).
-			Foreground(lipgloss.Color("#f0d0a0")).
+			Background(lipgloss.Color(bgColor)).
+			Foreground(lipgloss.Color("#ffffff")).
 			Bold(true)
 		bar := barStyle.Render(borderBarChar(m, pos))
 		bodyWidth := width - 1
 		body := bodyStyle.Render(padRight(text, bodyWidth))
 		return bar + body
 	}
-	return AdjustEventStyle.Render(padRight(text, width))
+	style := lipgloss.NewStyle().
+		Background(lipgloss.Color(bgColor)).
+		Foreground(lipgloss.Color("#ffffff")).
+		Bold(true)
+	return style.Render(padRight(text, width))
 }
 
-// renderCreatePreviewContent renders create preview with the same left color bar style as events.
-// Uses a distinct blue color (#5f87ff) to distinguish from existing events.
+// renderCreatePreviewContent renders create preview with the current accent color.
 func renderCreatePreviewContent(m *Model, text string, width int) string {
-	createColor := "#5f87ff"
+	createColor := m.uiColor("create_preview", m.uiColor("accent", "#00a8ff"))
 	if m.settings.ShowBorders && width >= 2 {
 		barStyle := lipgloss.NewStyle().
 			Foreground(lipgloss.Color(createColor)).
-			Background(lipgloss.Color("#1c1c2e"))
+			Background(lipgloss.Color(eventBGColor(m)))
 		bodyStyle := lipgloss.NewStyle().
-			Background(lipgloss.Color("#1c1c2e")).
+			Background(lipgloss.Color(eventBGColor(m))).
 			Foreground(lipgloss.Color("#e0e0e0"))
 		bar := barStyle.Render("\u258e")
 		bodyWidth := width - 1
@@ -728,8 +961,31 @@ func renderCreatePreviewContent(m *Model, text string, width int) string {
 	return style.Render(padRight(text, width))
 }
 
+func createPreviewLabel(m *Model, col, rowStartMin, rowEndMin int) string {
+	mpr := m.MinutesPerRow()
+	createStartMin, createEndMin, ok := createRangeForCol(m, col)
+	if !ok {
+		return ""
+	}
+	titleRowStart := (createStartMin / mpr) * mpr
+	titleRowEnd := titleRowStart + mpr
+	timeLabel := formatCreateTimeRange(createStartMin, createEndMin)
+
+	switch {
+	case rowStartMin <= createStartMin && createStartMin < rowEndMin:
+		if m.inputBuffer != "" {
+			return m.inputBuffer
+		}
+		return timeLabel
+	case rowStartMin == titleRowEnd && m.inputBuffer != "":
+		return timeLabel
+	default:
+		return ""
+	}
+}
+
 func renderSingleEvent(m *Model, col, idx int, ev Event, layout EventLayout,
-	rowStartMin, rowEndMin, colWidth int, isCursorRow bool, overrideTotalCols int) string {
+	rowStartMin, rowEndMin, colWidth int, isCursorRow bool, overrideTotalCols int, showNowLine bool) string {
 
 	totalCols := layout.TotalCol
 	if totalCols < 1 {
@@ -755,84 +1011,268 @@ func renderSingleEvent(m *Model, col, idx int, ev Event, layout EventLayout,
 	if layout.Col == totalCols-1 {
 		w = lastSubWidth
 	}
+	borderChars := 1
 
-	label := eventLabel(m, ev, rowStartMin, rowEndMin)
+	label := eventLabel(m, ev, rowStartMin, rowEndMin, w-borderChars, totalCols <= 1)
 	pos := getEventRowPos(m, ev, rowStartMin, rowEndMin)
+	isVisualHit := isVisualSelected(m, col, idx)
 
 	// Determine the style for this event
-	isAdjusting := m.mode == ModeAdjust && col == m.cursorCol && idx == m.adjustIndex
+	isAdjusting := isAdjustEventSelected(m, ev)
 	isSearchHit := isSearchMatch(m, col, idx)
 	isCurrentMatch := isCurrentSearchMatch(m, col, idx)
 	var style lipgloss.Style
-	if !isAdjusting && !isCursorRow && !isSearchHit {
+	if !isAdjusting && !isCursorRow && !isSearchHit && !isVisualHit {
 		style = eventColorStyle(m, idx)
 	}
-
-	// Calculate max label width accounting for left border
-	borderChars := 1
 
 	if totalCols <= 1 {
 		// Single column: render the whole cell
 		if isAdjusting {
-			return renderAdjustContent(m, truncLabel(label, colWidth-borderChars), colWidth, pos)
+			if showNowLine {
+				return renderNowLineAdjustContent(m, colWidth, pos)
+			}
+			return renderAdjustContent(m, label, colWidth, pos, rowStartMin)
 		}
 		if isCurrentMatch {
-			return renderSearchSelectedContent(m, idx, truncLabel(label, colWidth-borderChars), colWidth, pos)
+			if showNowLine {
+				return renderNowLineSearchSelectedContent(m, idx, colWidth, pos)
+			}
+			return renderSearchSelectedContent(m, idx, label, colWidth, pos)
+		}
+		if isVisualHit {
+			if showNowLine {
+				return renderNowLineCursorContent(m, idx, colWidth, pos)
+			}
+			return renderCursorContent(m, idx, label, colWidth, pos, rowStartMin)
 		}
 		if isCursorRow {
-			return renderCursorContent(m, idx, truncLabel(label, colWidth-borderChars), colWidth, pos)
+			if showNowLine {
+				return renderNowLineCursorContent(m, idx, colWidth, pos)
+			}
+			return renderCursorContent(m, idx, label, colWidth, pos, rowStartMin)
 		}
 		if isSearchHit {
-			return renderSearchContent(m, idx, truncLabel(label, colWidth-borderChars), colWidth, pos)
+			if showNowLine {
+				return renderNowLineSearchContent(m, idx, colWidth, pos)
+			}
+			return renderSearchContent(m, idx, label, colWidth, pos)
 		}
-		return renderEventContent(m, idx, truncLabel(label, colWidth-borderChars), colWidth, style, true, pos)
+		if showNowLine {
+			return renderNowLineEventContent(m, idx, colWidth, pos)
+		}
+		return renderEventContent(m, idx, label, colWidth, style, true, pos, rowStartMin)
 	}
 
 	// Multi sub-columns: only style the event content, leave prefix/suffix unstyled
 	offset := layout.Col * subWidth
-	prefix := fmt.Sprintf("%-*s", offset, "")
+	prefix := fillEmptySelected(offset, showNowLine, isVisualHit)
 	var styledContent string
 	if isAdjusting {
-		styledContent = renderAdjustContent(m, truncLabel(label, w-borderChars), w, pos)
+		if showNowLine {
+			styledContent = renderNowLineAdjustContent(m, w, pos)
+		} else {
+			styledContent = renderAdjustContent(m, label, w, pos, rowStartMin)
+		}
 	} else if isCurrentMatch {
-		styledContent = renderSearchSelectedContent(m, idx, truncLabel(label, w-borderChars), w, pos)
+		if showNowLine {
+			styledContent = renderNowLineSearchSelectedContent(m, idx, w, pos)
+		} else {
+			styledContent = renderSearchSelectedContent(m, idx, label, w, pos)
+		}
+	} else if isVisualHit {
+		if showNowLine {
+			styledContent = renderNowLineCursorContent(m, idx, w, pos)
+		} else {
+			styledContent = renderCursorContent(m, idx, label, w, pos, rowStartMin)
+		}
 	} else if isCursorRow {
-		styledContent = renderCursorContent(m, idx, truncLabel(label, w-borderChars), w, pos)
+		if showNowLine {
+			styledContent = renderNowLineCursorContent(m, idx, w, pos)
+		} else {
+			styledContent = renderCursorContent(m, idx, label, w, pos, rowStartMin)
+		}
 	} else if isSearchHit {
-		styledContent = renderSearchContent(m, idx, truncLabel(label, w-borderChars), w, pos)
+		if showNowLine {
+			styledContent = renderNowLineSearchContent(m, idx, w, pos)
+		} else {
+			styledContent = renderSearchContent(m, idx, label, w, pos)
+		}
 	} else {
-		styledContent = renderEventContent(m, idx, truncLabel(label, w-borderChars), w, style, true, pos)
+		if showNowLine {
+			styledContent = renderNowLineEventContent(m, idx, w, pos)
+		} else {
+			styledContent = renderEventContent(m, idx, label, w, style, true, pos, rowStartMin)
+		}
 	}
 	remaining := colWidth - offset - w
 	suffix := ""
 	if remaining > 0 {
-		suffix = fmt.Sprintf("%-*s", remaining, "")
+		suffix = fillEmptySelected(remaining, showNowLine, isVisualHit)
 	}
 	return prefix + styledContent + suffix
 }
 
 // eventLabel returns the label to display for an event in a given row.
-// Shows title on the event's first row, time range on the row after, description on the row after that (if enabled).
-func eventLabel(m *Model, ev Event, rowStartMin, rowEndMin int) string {
+// Titles and times stay on single rows and truncate when narrow.
+func eventLabel(m *Model, ev Event, rowStartMin, rowEndMin, maxWidth int, allowWrap bool) string {
+	showLabel, showDesc := segmentDisplayPolicy(m, ev)
+	if !showLabel {
+		return ""
+	}
 	mpr := m.MinutesPerRow()
+	rows := (ev.EndMin - ev.StartMin + mpr - 1) / mpr
+	if rows <= 2 {
+		allowWrap = false
+	}
 	titleRowStart := (ev.StartMin / mpr) * mpr
-	titleRowEnd := titleRowStart + mpr
+	if rows <= 1 {
+		if rowStartMin == titleRowStart {
+			compact := displayTitle(ev) + " " + MinToTime(ev.StartMin)
+			return truncLabel(compact, maxWidth)
+		}
+		return ""
+	}
+	titleLines := wrapLabel(displayTitle(ev), maxWidth)
+	if !allowWrap && len(titleLines) > 1 {
+		titleLines = titleLines[:1]
+	}
+	if len(titleLines) == 0 {
+		titleLines = []string{""}
+	}
+	timeInline := eventDisplayTimeRange(m, ev)
 
-	if ev.StartMin >= rowStartMin && ev.StartMin < rowEndMin {
-		// First row: show title
-		return displayTitle(ev)
+	lineIndex := (rowStartMin - titleRowStart) / mpr
+	if lineIndex < 0 {
+		return ""
 	}
-	if rowStartMin == titleRowEnd {
-		// Second row: show time range
-		return MinToTime(ev.StartMin) + " – " + MinToTime(ev.EndMin)
+
+	if lineIndex < len(titleLines) {
+		return titleLines[lineIndex]
 	}
-	if m.settings.ShowDescs && ev.Desc != "" {
-		descRowStart := titleRowEnd + mpr
-		if rowStartMin == descRowStart {
-			return ev.Desc
+	timeIndex := len(titleLines)
+	if lineIndex == timeIndex {
+		return truncLabel(timeInline, maxWidth)
+	}
+	if showDesc && m.settings.ShowDescs && ev.Desc != "" {
+		descStartIndex := timeIndex + 1
+		descLines := wrapLabel(ev.Desc, maxWidth)
+		if !allowWrap && len(descLines) > 1 {
+			descLines = descLines[:1]
+		}
+		descIndex := lineIndex - descStartIndex
+		if descIndex >= 0 && descIndex < len(descLines) {
+			return descLines[descIndex]
 		}
 	}
 	return ""
+}
+
+func wrapLabel(label string, maxWidth int) []string {
+	if maxWidth <= 0 {
+		return nil
+	}
+	words := strings.Fields(label)
+	if len(words) == 0 {
+		return nil
+	}
+	var lines []string
+	current := words[0]
+	for _, word := range words[1:] {
+		candidate := current + " " + word
+		if len([]rune(candidate)) <= maxWidth {
+			current = candidate
+			continue
+		}
+		lines = append(lines, truncLabel(current, maxWidth))
+		current = word
+	}
+	lines = append(lines, truncLabel(current, maxWidth))
+	return lines
+}
+
+func eventDisplayTimeRange(m *Model, ev Event) string {
+	if ev.GroupID == "" {
+		return MinToTime(ev.StartMin) + " - " + MinToTime(ev.EndMin)
+	}
+	grouped := occurrenceSegments(m, ev)
+	if len(grouped) == 0 {
+		return MinToTime(ev.StartMin) + " - " + MinToTime(ev.EndMin)
+	}
+	start := grouped[0].StartMin
+	end := grouped[len(grouped)-1].EndMin
+	return MinToTime(start) + " - " + MinToTime(end)
+}
+
+func occurrenceSegments(m *Model, ev Event) []Event {
+	if ev.GroupID == "" {
+		return []Event{ev}
+	}
+	if (m.mode == ModeAdjust || m.mode == ModeConfirmRecurMove) && m.adjustPreviewGroupID != "" && ev.GroupID == m.adjustPreviewGroupID {
+		segments := m.recurringAdjustPreviewSegments()
+		if len(segments) > 0 {
+			return segments
+		}
+	}
+	if (m.mode == ModeAdjust || m.mode == ModeConfirmRecurMove) && m.adjustRecurringSelection {
+		previews := m.recurringSelectionPreviewEvents()
+		if strings.HasPrefix(ev.ID, "__selection_preview__") {
+			if ev.GroupID == "" {
+				for _, p := range previews {
+					if p.ID == ev.ID {
+						return []Event{p}
+					}
+				}
+			}
+			if ev.GroupID != "" {
+				var grouped []Event
+				for _, p := range previews {
+					if p.GroupID == ev.GroupID {
+						grouped = append(grouped, p)
+					}
+				}
+				if len(grouped) > 0 {
+					return grouped
+				}
+			}
+		}
+	}
+	baseDate, baseIdx, baseSeg := m.store.findEventRecordByID(ev.ID)
+	if baseIdx < 0 {
+		return []Event{ev}
+	}
+	baseSegments := m.store.groupedEvents(baseSeg)
+	if len(baseSegments) == 0 {
+		return []Event{ev}
+	}
+	if !ev.IsRecurring() {
+		return baseSegments
+	}
+	dayShift := int(DateKey(ev.Date).Sub(DateKey(baseDate)).Hours() / 24)
+	segments := make([]Event, len(baseSegments))
+	for i, seg := range baseSegments {
+		shifted := seg
+		shifted.Date = DateKey(seg.Date).AddDate(0, 0, dayShift)
+		shifted.DateStr = shifted.Date.Format("2006-01-02")
+		segments[i] = shifted
+	}
+	return segments
+}
+
+func segmentDisplayPolicy(m *Model, ev Event) (showLabel bool, showDesc bool) {
+	if ev.GroupID == "" {
+		return true, true
+	}
+	segments := occurrenceSegments(m, ev)
+	if len(segments) == 0 {
+		return true, true
+	}
+	hasPrev := DateKey(segments[0].Date) != DateKey(ev.Date)
+	hasNext := DateKey(segments[len(segments)-1].Date) != DateKey(ev.Date)
+	if hasPrev && hasNext {
+		return false, false
+	}
+	return true, !hasPrev
 }
 
 // displayTitle returns the event title with a recurrence prefix if applicable.

@@ -11,6 +11,55 @@ import (
 
 var editMenuFields = [7]string{"Title", "Desc", "Date", "Start", "End", "Repeat", "Until"}
 
+func editFieldHelp(field int) string {
+	switch field {
+	case 0:
+		return "Title: free text"
+	case 1:
+		return "Desc: free text"
+	case 2:
+		return "Date: YYYY-MM-DD"
+	case 3:
+		return "Start: HH:MM"
+	case 4:
+		return "End: HH:MM (must be after start)"
+	case 5:
+		return "Repeat: None, Daily, Weekdays, Weekly, Biweekly, Monthly, Yearly"
+	case 6:
+		return "Until: YYYY-MM-DD or blank"
+	default:
+		return ""
+	}
+}
+
+func renderRepeatHelp(current string) string {
+	var b strings.Builder
+	b.WriteString("Repeat options:")
+	for _, opt := range RecurrenceOptions {
+		label := RecurrenceLabel(opt)
+		line := "# " + label
+		if opt == current {
+			line = label
+		}
+		b.WriteString("\n")
+		b.WriteString("  " + line)
+	}
+	return StatusHintStyle.Render(b.String())
+}
+
+func renderFieldFormatHelp() string {
+	lines := []string{
+		"Field formats:",
+		"  Title: free text",
+		"  Desc: free text",
+		"  Date: YYYY-MM-DD",
+		"  Start: HH:MM",
+		"  End: HH:MM",
+		"  Until: YYYY-MM-DD or blank",
+	}
+	return StatusHintStyle.Render(strings.Join(lines, "\n"))
+}
+
 // updateEditMenu handles key events in the inline edit menu.
 func (m Model) updateEditMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.editMenuActive {
@@ -198,9 +247,10 @@ func (m *Model) applyEditMenu() error {
 
 // RenderEditMenu renders the inline event editor.
 func RenderEditMenu(m *Model) string {
+	accent := m.uiColor("accent", "39")
 	titleStyle := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color("39")).
+		Foreground(lipgloss.Color(accent)).
 		MarginBottom(1)
 
 	fieldStyle := lipgloss.NewStyle().
@@ -233,7 +283,7 @@ func RenderEditMenu(m *Model) string {
 		var val string
 		displayVal := m.editMenuValues[i]
 		// Show human-readable label for recurrence field
-		if i == 4 {
+		if i == 5 {
 			displayVal = RecurrenceLabel(m.editMenuValues[i])
 		}
 
@@ -245,25 +295,28 @@ func RenderEditMenu(m *Model) string {
 		}
 
 		hint := ""
-		if i == 4 && i == m.editMenuField {
+		if i == 5 && i == m.editMenuField {
 			hint = "  (Enter: cycle)"
 		}
 
 		line := fmt.Sprintf("%s%-12s %s%s", cursor, label+":", val, hint)
 		b.WriteString(style.Render(line))
 		b.WriteString("\n")
+
+		if i == m.editMenuField {
+			b.WriteString(StatusHintStyle.Render("    " + editFieldHelp(i)))
+			b.WriteString("\n")
+			if i == 5 {
+				b.WriteString(renderRepeatHelp(m.editMenuValues[5]))
+				b.WriteString("\n")
+			}
+		}
 	}
 
 	b.WriteString("\n")
 	b.WriteString(StatusHintStyle.Render("j/k: field  Enter: edit  Esc/q: save & back"))
+	b.WriteString("\n")
+	b.WriteString(renderFieldFormatHelp())
 
-	// Center vertically
-	content := b.String()
-	contentLines := strings.Count(content, "\n") + 1
-	topPad := (m.height - contentLines - 2) / 3
-	if topPad < 0 {
-		topPad = 0
-	}
-
-	return strings.Repeat("\n", topPad) + content
+	return b.String()
 }

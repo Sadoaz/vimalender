@@ -54,6 +54,7 @@ type Event struct {
 	EndMin         int       `json:"end_min"`
 	Notes          string    `json:"notes"`
 	ID             string    `json:"id,omitempty"`
+	GroupID        string    `json:"group_id,omitempty"`
 	Recurrence     string    `json:"recurrence,omitempty"`
 	RecurUntilStr  string    `json:"recur_until,omitempty"`
 	ExceptionDates []string  `json:"exception_dates,omitempty"`
@@ -277,22 +278,132 @@ func (s *EventStore) FindEventByID(id string) (time.Time, int) {
 	return time.Time{}, -1
 }
 
+func groupKey(ev Event) string {
+	if ev.GroupID != "" {
+		return ev.GroupID
+	}
+	return ev.ID
+}
+
+func (s *EventStore) findEventRecordByID(id string) (time.Time, int, Event) {
+	date, idx := s.FindEventByID(id)
+	if idx < 0 {
+		return time.Time{}, -1, Event{}
+	}
+	return date, idx, s.events[DateKey(date)][idx]
+}
+
+func (s *EventStore) groupedEvents(ev Event) []Event {
+	key := groupKey(ev)
+	return s.groupedEventsByGroupID(key)
+}
+
+func (s *EventStore) groupedEventsByGroupID(key string) []Event {
+	var grouped []Event
+	for _, events := range s.events {
+		for _, candidate := range events {
+			if groupKey(candidate) == key {
+				grouped = append(grouped, candidate)
+			}
+		}
+	}
+	sort.Slice(grouped, func(i, j int) bool {
+		if !DateKey(grouped[i].Date).Equal(DateKey(grouped[j].Date)) {
+			return DateKey(grouped[i].Date).Before(DateKey(grouped[j].Date))
+		}
+		if grouped[i].StartMin != grouped[j].StartMin {
+			return grouped[i].StartMin < grouped[j].StartMin
+		}
+		return grouped[i].ID < grouped[j].ID
+	})
+	return grouped
+}
+
+func (s *EventStore) LogicalEventByID(id string) (Event, int, error) {
+	_, idx, ev := s.findEventRecordByID(id)
+	if idx < 0 {
+		return Event{}, 0, fmt.Errorf("event not found")
+	}
+	grouped := s.groupedEvents(ev)
+	if len(grouped) == 0 {
+		return Event{}, 0, fmt.Errorf("event not found")
+	}
+	start := grouped[0]
+	last := grouped[len(grouped)-1]
+	daySpan := int(DateKey(last.Date).Sub(DateKey(start.Date)).Hours() / 24)
+	duration := daySpan*MinutesPerDay + last.EndMin - start.StartMin
+	return start, duration, nil
+}
+
+func groupedGroupID(events []Event) string {
+	for _, ev := range events {
+		if ev.GroupID != "" {
+			return ev.GroupID
+		}
+	}
+	return ""
+}
+
+func (s *EventStore) deleteGroupedEvents(group string) {
+	for date, events := range s.events {
+		kept := events[:0]
+		for _, ev := range events {
+			if groupKey(ev) != group {
+				kept = append(kept, ev)
+			}
+		}
+		if len(kept) == 0 {
+			delete(s.events, date)
+		} else {
+			s.events[date] = kept
+		}
+	}
+}
+
 // AddException adds an exception date to a recurring event, identified by ID.
 func (s *EventStore) AddException(id string, exceptionDate time.Time) error {
 	date, idx := s.FindEventByID(id)
 	if idx < 0 {
 		return fmt.Errorf("event not found")
 	}
-	excStr := DateKey(exceptionDate).Format("2006-01-02")
-	s.events[date][idx].ExceptionDates = append(s.events[date][idx].ExceptionDates, excStr)
+	ev := s.events[date][idx]
+	grouped := s.groupedEvents(ev)
+	anchorDate := DateKey(grouped[0].Date)
+	selectedDate := DateKey(exceptionDate)
+	selectedBaseDate := DateKey(ev.Date)
+	occurrenceAnchor := selectedDate.AddDate(0, 0, -int(selectedBaseDate.Sub(anchorDate).Hours()/24))
+	for _, part := range grouped {
+		partDate, partIdx := s.FindEventByID(part.ID)
+		if partIdx < 0 {
+			continue
+		}
+		offset := int(DateKey(part.Date).Sub(anchorDate).Hours() / 24)
+		partExc := occurrenceAnchor.AddDate(0, 0, offset).Format("2006-01-02")
+		if !containsString(s.events[partDate][partIdx].ExceptionDates, partExc) {
+			s.events[partDate][partIdx].ExceptionDates = append(s.events[partDate][partIdx].ExceptionDates, partExc)
+		}
+	}
 	return nil
+}
+
+func containsString(items []string, target string) bool {
+	for _, item := range items {
+		if item == target {
+			return true
+		}
+	}
+	return false
 }
 
 // DeleteByID deletes a base event entirely by its ID.
 func (s *EventStore) DeleteByID(id string) error {
-	date, idx := s.FindEventByID(id)
+	date, idx, ev := s.findEventRecordByID(id)
 	if idx < 0 {
 		return fmt.Errorf("event not found")
+	}
+	if ev.GroupID != "" {
+		s.deleteGroupedEvents(ev.GroupID)
+		return nil
 	}
 	s.Delete(date, idx)
 	return nil
@@ -315,6 +426,29 @@ func (s *EventStore) Add(e Event) error {
 	s.events[key] = append(s.events[key], e)
 	// Don't clear layout cache — existing events keep their columns,
 	// new event will be placed in the next available slot.
+	return nil
+}
+
+// AddSpanningEvent inserts an event and splits it into linked day segments when
+// its end extends past midnight.
+func (s *EventStore) AddSpanningEvent(e Event) error {
+	if e.StartMin < 0 || e.StartMin >= MinutesPerDay {
+		return fmt.Errorf("minutes must be in range 0-%d", MinutesPerDay)
+	}
+	segments, err := buildSpanningSegments(e, e.Date, e.StartMin, e.EndMin-e.StartMin, "")
+	if err != nil {
+		return err
+	}
+	added := make([]string, 0, len(segments))
+	for _, seg := range segments {
+		if err := s.Add(seg); err != nil {
+			for _, id := range added {
+				_ = s.DeleteByID(id)
+			}
+			return err
+		}
+		added = append(added, seg.ID)
+	}
 	return nil
 }
 
@@ -362,6 +496,107 @@ func (s *EventStore) MoveEventByID(id string, delta int) error {
 	return s.MoveEvent(date, idx, delta)
 }
 
+// ShiftEventByID shifts an event by delta minutes, carrying it across midnight
+// into adjacent days as needed. Overnight events are stored as linked segments.
+// Returns the active segment's stored date and ID.
+func (s *EventStore) ShiftEventByID(id string, delta int) (time.Time, string, error) {
+	_, idx, ev := s.findEventRecordByID(id)
+	if idx < 0 {
+		return time.Time{}, "", fmt.Errorf("event not found")
+	}
+
+	grouped := s.groupedEvents(ev)
+	startDate := DateKey(grouped[0].Date)
+	startMin := grouped[0].StartMin
+	last := grouped[len(grouped)-1]
+	daySpan := int(DateKey(last.Date).Sub(startDate).Hours() / 24)
+	duration := daySpan*MinutesPerDay + last.EndMin - startMin
+	if duration <= 0 {
+		return time.Time{}, "", fmt.Errorf("unsupported event duration")
+	}
+	selectedSegIdx := 0
+	for i, part := range grouped {
+		if part.ID == id {
+			selectedSegIdx = i
+			break
+		}
+	}
+
+	newStartTotal := startMin + delta
+	dayShift := 0
+	for newStartTotal < 0 {
+		newStartTotal += MinutesPerDay
+		dayShift--
+	}
+	for newStartTotal >= MinutesPerDay {
+		newStartTotal -= MinutesPerDay
+		dayShift++
+	}
+	newDate := DateKey(startDate.AddDate(0, 0, dayShift))
+	groupID := groupedGroupID(grouped)
+	segments, err := buildSpanningSegments(grouped[0], newDate, newStartTotal, duration, groupID)
+	if err != nil {
+		return time.Time{}, "", err
+	}
+	if group := groupedGroupID(grouped); group != "" {
+		s.deleteGroupedEvents(group)
+	} else {
+		s.deleteGroupedEvents(grouped[0].ID)
+	}
+	for _, seg := range segments {
+		if err := s.Add(seg); err != nil {
+			return time.Time{}, "", err
+		}
+	}
+	if selectedSegIdx >= len(segments) {
+		selectedSegIdx = len(segments) - 1
+	}
+	active := segments[selectedSegIdx]
+	return active.Date, active.ID, nil
+}
+
+func buildSpanningSegments(template Event, startDate time.Time, startMin, duration int, groupID string) ([]Event, error) {
+	if duration <= 0 {
+		return nil, fmt.Errorf("end must be after start")
+	}
+	if startMin < 0 || startMin >= MinutesPerDay {
+		return nil, fmt.Errorf("minutes must be in range 0-%d", MinutesPerDay)
+	}
+	remaining := duration
+	currentDate := DateKey(startDate)
+	currentStart := startMin
+	parts := make([]Event, 0, 4)
+	sharedGroupID := groupID
+	for remaining > 0 {
+		part := template
+		if len(parts) > 0 || part.ID == "" {
+			part.ID = GenerateID()
+		}
+		part.Date = currentDate
+		part.DateStr = currentDate.Format("2006-01-02")
+		part.StartMin = currentStart
+		span := MinutesPerDay - currentStart
+		if span > remaining {
+			span = remaining
+		}
+		part.EndMin = currentStart + span
+		part.GroupID = ""
+		parts = append(parts, part)
+		remaining -= span
+		currentDate = currentDate.AddDate(0, 0, 1)
+		currentStart = 0
+	}
+	if sharedGroupID != "" || len(parts) > 1 {
+		if sharedGroupID == "" {
+			sharedGroupID = GenerateID()
+		}
+		for i := range parts {
+			parts[i].GroupID = sharedGroupID
+		}
+	}
+	return parts, nil
+}
+
 // MoveEventToDate moves an event from one date to another, returning the new index.
 func (s *EventStore) MoveEventToDate(fromDate time.Time, index int, toDate time.Time) (int, error) {
 	fromKey := DateKey(fromDate)
@@ -390,6 +625,20 @@ func (s *EventStore) MoveEventToDateByID(id string, toDate time.Time) (int, erro
 	fromDate, idx := s.FindEventByID(id)
 	if idx < 0 {
 		return -1, fmt.Errorf("event not found")
+	}
+	if _, _, ev := s.findEventRecordByID(id); ev.GroupID != "" {
+		delta := int(DateKey(toDate).Sub(DateKey(fromDate)).Hours() / 24)
+		newDate, newID, err := s.ShiftEventByID(id, delta*MinutesPerDay)
+		if err != nil {
+			return -1, err
+		}
+		events := s.GetByDate(newDate)
+		for i, ev := range events {
+			if ev.ID == newID {
+				return i, nil
+			}
+		}
+		return -1, fmt.Errorf("event not found after move")
 	}
 	return s.MoveEventToDate(fromDate, idx, toDate)
 }
@@ -451,12 +700,17 @@ type EventLayout struct {
 // pinnedID and pinnedCol, if pinnedID is non-empty, pin that event to the given
 // column so it doesn't swap positions during adjust mode.
 func (s *EventStore) LayoutEvents(date time.Time, pinnedID string, pinnedCol int) map[int]EventLayout {
-	events := s.GetByDate(date)
+	return layoutEventsList(s.GetByDate(date), pinnedID, pinnedCol)
+}
+
+func layoutEventsList(events []Event, pinnedID string, pinnedCol int) map[int]EventLayout {
 	if len(events) == 0 {
 		return nil
 	}
 
-	// Sort indices by start time, then by end time, then by ID for stability
+	// Sort indices by start time, then by longer duration first, then by ID.
+	// This gives long anchor events the leftmost columns and makes dense
+	// overlap groups read more clearly when 3+ events share a period.
 	indices := make([]int, len(events))
 	for i := range indices {
 		indices[i] = i
@@ -467,7 +721,7 @@ func (s *EventStore) LayoutEvents(date time.Time, pinnedID string, pinnedCol int
 			return ea.StartMin < eb.StartMin
 		}
 		if ea.EndMin != eb.EndMin {
-			return ea.EndMin < eb.EndMin
+			return ea.EndMin > eb.EndMin
 		}
 		return ea.ID < eb.ID
 	})
@@ -475,7 +729,9 @@ func (s *EventStore) LayoutEvents(date time.Time, pinnedID string, pinnedCol int
 	layout := make(map[int]EventLayout)
 	columns := []int{} // end minutes for each column
 
-	// If there's a pinned event (adjust mode), place it first
+	// If there's a pinned event (adjust mode), remember it so we can prefer the
+	// same visual column when we reach it in time order. Do not reserve that
+	// column up front, otherwise unrelated earlier events get squeezed.
 	pinnedIdx := -1
 	if pinnedID != "" {
 		for i, ev := range events {
@@ -485,37 +741,28 @@ func (s *EventStore) LayoutEvents(date time.Time, pinnedID string, pinnedCol int
 			}
 		}
 	}
-	if pinnedIdx >= 0 {
-		for len(columns) <= pinnedCol {
-			columns = append(columns, 0)
-		}
-		columns[pinnedCol] = events[pinnedIdx].EndMin
-		layout[pinnedIdx] = EventLayout{Col: pinnedCol}
-	}
 
-	// Greedy placement for all other events.
-	// columns[] stores the "visual occupy until" time for each column.
-	// Multi-row events (> 30 min) already have a rendering gap (last row
-	// removed), so their visual end is endMin - 30 and the next row is free.
-	// Short events (≤ 30 min) have no rendering gap, so we add 30 min
-	// to prevent the next event from being glued to them visually.
-	const mpr = 30 // must match MinutesPerRow
+	// Greedy placement for all other events using real time overlap.
+	// This keeps back-to-back events in the same column and avoids long
+	// chains of unrelated events being squeezed into the same overlap group.
 	for _, idx := range indices {
-		if idx == pinnedIdx {
-			continue
-		}
 		ev := events[idx]
+
+		if idx == pinnedIdx {
+			for len(columns) <= pinnedCol {
+				columns = append(columns, 0)
+			}
+			if columns[pinnedCol] <= ev.StartMin {
+				columns[pinnedCol] = ev.EndMin
+				layout[idx] = EventLayout{Col: pinnedCol}
+				continue
+			}
+		}
+
 		placed := false
 		for c := range columns {
 			if columns[c] <= ev.StartMin {
-				// Store the visual occupy-until time
-				if ev.EndMin-ev.StartMin > mpr {
-					// Multi-row: rendering gap already provides spacing
-					columns[c] = ev.EndMin
-				} else {
-					// Short event: add explicit gap
-					columns[c] = ev.EndMin + mpr
-				}
+				columns[c] = ev.EndMin
 				layout[idx] = EventLayout{Col: c}
 				placed = true
 				break
@@ -523,22 +770,12 @@ func (s *EventStore) LayoutEvents(date time.Time, pinnedID string, pinnedCol int
 		}
 		if !placed {
 			layout[idx] = EventLayout{Col: len(columns)}
-			if ev.EndMin-ev.StartMin > mpr {
-				columns = append(columns, ev.EndMin)
-			} else {
-				columns = append(columns, ev.EndMin+mpr)
-			}
+			columns = append(columns, ev.EndMin)
 		}
 	}
 
-	// Compute TotalCol using visual-row grouping.
-	// For each "visual row" (every mpr-minute slot), find all events that
-	// occupy that row (including gap rows for short events). All events
-	// sharing any visual row are grouped together via union-find, and the
-	// group's TotalCol = max(Col+1) across members.
-	//
-	// This handles real overlaps, gap-adjacent events, and mixed cases
-	// uniformly without special-case post-passes.
+	// Compute TotalCol using real overlap grouping.
+	// Only events that truly overlap in time should share width.
 	parent := make(map[int]int)
 	for _, idx := range indices {
 		parent[idx] = idx
@@ -557,21 +794,17 @@ func (s *EventStore) LayoutEvents(date time.Time, pinnedID string, pinnedCol int
 		}
 	}
 
-	// Compute each event's visual occupy range (matching greedy placement).
+	// Compute each event's actual occupy range.
 	type visualRange struct {
 		start, end int
 	}
 	vr := make(map[int]visualRange)
 	for _, idx := range indices {
 		ev := events[idx]
-		vEnd := ev.EndMin
-		if ev.EndMin-ev.StartMin <= mpr {
-			vEnd = ev.EndMin + mpr // short events get gap
-		}
-		vr[idx] = visualRange{ev.StartMin, vEnd}
+		vr[idx] = visualRange{ev.StartMin, ev.EndMin}
 	}
 
-	// Union events whose visual ranges overlap.
+	// Union events whose actual time ranges overlap.
 	for i := 0; i < len(indices); i++ {
 		for j := i + 1; j < len(indices); j++ {
 			a, b := indices[i], indices[j]
@@ -610,6 +843,12 @@ func (s *EventStore) LayoutEvents(date time.Time, pinnedID string, pinnedCol int
 	}
 
 	return layout
+}
+
+func (s *EventStore) LayoutEventsWithPreview(date time.Time, preview Event, pinnedID string, pinnedCol int) (map[int]EventLayout, int) {
+	events := append(append([]Event{}, s.GetByDate(date)...), preview)
+	layout := layoutEventsList(events, pinnedID, pinnedCol)
+	return layout, len(events) - 1
 }
 
 // EventCount returns the number of events on the given date (including virtual occurrences).

@@ -127,10 +127,11 @@ func RenderYear(m *Model) string {
 	}
 
 	// Styles
+	accent := m.uiColor("accent", "39")
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	monthNameStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
+	monthNameStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(accent)).Bold(true)
 	dayStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
-	todayStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
+	todayStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(accent)).Bold(true)
 	selectedStyle := lipgloss.NewStyle().Background(lipgloss.Color("236")).Foreground(lipgloss.Color("255"))
 	hasEventStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("70"))
 
