@@ -1,13 +1,13 @@
-# Vimalender
+# vimalender
 
 A vim-style terminal calendar built with Go, [Bubble Tea](https://github.com/charmbracelet/bubbletea), and [Lip Gloss](https://github.com/charmbracelet/lipgloss).
 
 Navigate, create, move, search, and customize events entirely from the keyboard with familiar vim motions.
 
 
+Demo:
+https://github.com/user-attachments/assets/5c1090b0-922f-4f04-b4ba-83717fbde6fb
 
-
-https://github.com/user-attachments/assets/3fd118bb-7acf-444f-8a72-b4837b4af1e1
 
 
 
