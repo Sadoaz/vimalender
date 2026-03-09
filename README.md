@@ -109,7 +109,7 @@ Press `?` any time in the main UI to open the help panel. It shows the current b
 | `e` | Edit event in `$EDITOR` (falls back to `vi`) |
 | `dd` | Delete event (vim-style double-key) |
 | `x` | Cut selected event |
-| `y` | Copy selected event |
+| `yy` | Copy selected event |
 | `p` | Paste clipboard at cursor |
 | `u` | Undo last action (create, delete, move, edit) |
 | `Ctrl+R` | Redo |
@@ -151,7 +151,7 @@ Press `V` in week view to start a visual time-range selection.
 | `h` / `j` / `k` / `l` | Expand the selection |
 | `Ctrl+D` / `Ctrl+U` | Expand faster |
 | `J` / `K` | Expand by exactly 1 minute |
-| `yy` | Copy selected events |
+| `y` | Copy selected events |
 | `x` | Cut selected events |
 | `d` | Delete selected events |
 | `m` | Move selected events together |

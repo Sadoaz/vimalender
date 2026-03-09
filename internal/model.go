@@ -1860,14 +1860,21 @@ func (m Model) updateNavigate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case IsKey(msg, KeyY):
-		id := m.selectedLogicalEventID()
-		if id != "" {
-			item, title, err := m.clipboardItemForEvent(id)
-			if err == nil {
-				m.clipboard = []ClipboardItem{item}
-				m.statusMsg = fmt.Sprintf("Copied %q", title)
+		if m.pendingYank {
+			id := m.selectedLogicalEventID()
+			if id != "" {
+				item, title, err := m.clipboardItemForEvent(id)
+				if err == nil {
+					m.clipboard = []ClipboardItem{item}
+					m.statusMsg = fmt.Sprintf("Copied %q", title)
+				}
 			}
+			m.pendingYank = false
+			return m, nil
 		}
+		m.pendingYank = true
+		m.statusMsg = "y-"
+		return m, nil
 
 	case IsKey(msg, KeyP):
 		if len(m.clipboard) > 0 {
@@ -2106,14 +2113,9 @@ func (m Model) updateVisual(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case IsKey(msg, KeyY):
-		if m.pendingYank {
-			m.clipboard = m.visualClipboardItems()
-			m.clearVisualSelection()
-			m.statusMsg = fmt.Sprintf("Copied %d event(s)", len(m.clipboard))
-			return m, nil
-		}
-		m.pendingYank = true
-		m.statusMsg = "y-"
+		m.clipboard = m.visualClipboardItems()
+		m.clearVisualSelection()
+		m.statusMsg = fmt.Sprintf("Copied %d event(s)", len(m.clipboard))
 		return m, nil
 
 	case IsKey(msg, KeyX):
@@ -2993,7 +2995,7 @@ func helpRows() []helpRow {
 		{"Week View", KeyA, DisplayKey(KeyA), "Create event", "start a new event", true},
 		{"Week View", KeyE, DisplayKey(KeyE), "Edit in editor", "open external editor", true},
 		{"Week View", KeyM, DisplayKey(KeyM), "Move event", "move selected event", true},
-		{"Week View", KeyY, DisplayKey(KeyY), "Copy", "copy selected event", true},
+		{"Week View", KeyY, DisplayKey(KeyY), "Copy", "press twice to copy selected event", true},
 		{"Week View", KeyX, DisplayKey(KeyX), "Cut", "cut selected event", true},
 		{"Week View", KeyP, DisplayKey(KeyP), "Paste", "paste clipboard event", true},
 		{"Week View", KeyShiftV, DisplayKey(KeyShiftV), "Visual select", "select a time range", true},
@@ -3011,6 +3013,7 @@ func helpRows() []helpRow {
 		{"Week View", KeyShiftS, DisplayKey(KeyShiftS), "Settings", "open settings", true},
 		{"Week View", KeyQuestion, DisplayKey(KeyQuestion), "Help", "open or close help", true},
 		{"Visual Mode", KeyD, DisplayKey(KeyD), "Delete selection", "remove selected events", true},
+		{"Visual Mode", KeyY, DisplayKey(KeyY), "Copy selection", "copy selected events", true},
 		{"Visual Mode", KeyEsc, DisplayKey(KeyEsc), "Cancel / back", "leave prompts and views", true},
 		{"Input Modes", KeyEnter, DisplayKey(KeyEnter), "Confirm input", "accept current prompt", true},
 		{"Input Modes", KeySpace, DisplayKey(KeySpace), "Menu confirm", "toggle settings/menu items", true},
