@@ -517,6 +517,24 @@ func (m *Model) visualSelectedEventIDs() []string {
 	return ids
 }
 
+func (m *Model) deleteVisualSelection() (int, error) {
+	selected := m.visualSelectedOccurrences()
+	deleted := 0
+	for _, ev := range selected {
+		if ev.IsRecurring() {
+			if err := m.store.AddException(ev.ID, ev.Date); err != nil {
+				return deleted, err
+			}
+		} else {
+			if err := m.store.DeleteByID(ev.ID); err != nil {
+				return deleted, err
+			}
+		}
+		deleted++
+	}
+	return deleted, nil
+}
+
 func (m *Model) clearVisualSelection() {
 	m.pendingYank = false
 	if m.mode == ModeVisual {
@@ -2100,27 +2118,29 @@ func (m Model) updateVisual(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case IsKey(msg, KeyX):
 		m.clipboard = m.visualClipboardItems()
-		ids := m.visualSelectedEventIDs()
 		m.pushUndo()
-		for _, id := range ids {
-			_ = m.store.DeleteByID(id)
+		deleted, err := m.deleteVisualSelection()
+		if err != nil {
+			m.statusMsg = err.Error()
+			return m, nil
 		}
 		m.saveEvents()
 		m.clearVisualSelection()
 		m.resetOverlapIndex()
-		m.statusMsg = fmt.Sprintf("Cut %d event(s)", len(ids))
+		m.statusMsg = fmt.Sprintf("Cut %d event(s)", deleted)
 		return m, nil
 
 	case IsKey(msg, KeyD):
-		ids := m.visualSelectedEventIDs()
 		m.pushUndo()
-		for _, id := range ids {
-			_ = m.store.DeleteByID(id)
+		deleted, err := m.deleteVisualSelection()
+		if err != nil {
+			m.statusMsg = err.Error()
+			return m, nil
 		}
 		m.saveEvents()
 		m.clearVisualSelection()
 		m.resetOverlapIndex()
-		m.statusMsg = fmt.Sprintf("Deleted %d event(s)", len(ids))
+		m.statusMsg = fmt.Sprintf("Deleted %d event(s)", deleted)
 		return m, nil
 
 	case IsKey(msg, KeyM):
