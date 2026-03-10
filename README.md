@@ -60,7 +60,7 @@ If you usually run the installed binary from `~/go/bin`, remember to run `go ins
 - Visual selection, copy, cut, paste, delete, and grouped move
 - Recurring move/delete flows with `o` = one occurrence and `a` = all occurrences
 - Search with persistent match navigation
-- In-app `.ics` import overlay opened with `I`
+- In-app `.ics` import and export flows available from `Settings`
 - In-app color customization for event color, consecutive-event color, event background, and UI accent
 
 ## Views
