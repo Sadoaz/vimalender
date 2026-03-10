@@ -47,7 +47,7 @@ git clone https://github.com/Sadoaz/vimalender.git
 cd vimalender
 go build -o vimalender .
 go install .
-vimalender
+./vimalender
 ```
 
 If you usually run the installed binary from `~/go/bin`, remember to run `go install .` after local changes.
@@ -60,6 +60,7 @@ If you usually run the installed binary from `~/go/bin`, remember to run `go ins
 - Visual selection, copy, cut, paste, delete, and grouped move
 - Recurring move/delete flows with `o` = one occurrence and `a` = all occurrences
 - Search with persistent match navigation
+- In-app `.ics` import overlay opened with `I`
 - In-app color customization for event color, consecutive-event color, event background, and UI accent
 
 ## Views
@@ -118,6 +119,24 @@ For recurring events:
 
 - delete prompts: **(o)ne** occurrence or **(a)ll**
 - move prompts: preview first, then `Enter`, then **(o)ne** or **(a)ll**
+
+### Importing `.ics`
+
+Open `Settings` with `S`, then choose `Import events`.
+
+- type or paste a relative or absolute `.ics` path
+- press `Tab` to complete matching folders and `.ics` files
+- press `Enter` to import supported VEVENT entries into your local calendar
+- unsupported recurrence rules, exceptions, and malformed events are skipped with reasons shown in the overlay
+- duplicate prevention is not automatic, so importing the same file again creates new events
+
+### Exporting `.ics`
+
+Open `Settings` with `S`, then choose `Export events`.
+
+- type or paste a relative or absolute `.ics` path
+- press `Tab` to complete matching folders and `.ics` files
+- press `Enter` to export your stored events to that file
 
 ### Create Flow
 

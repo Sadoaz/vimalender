@@ -36,6 +36,8 @@ const (
 	ModeMonth                   // month view navigation
 	ModeYear                    // year view navigation
 	ModeSettings                // settings menu
+	ModeImport                  // import events overlay
+	ModeExport                  // export events overlay
 	ModeEditMenu                // inline event editor
 )
 
@@ -59,9 +61,11 @@ const (
 // ZoomAuto is the sentinel value for auto-fit zoom.
 const ZoomAuto = -1
 
-const DefaultZoomLevel = 30
-const MaxPreciseZoomLevel = 30
-const MinZoomLevel = 1
+const (
+	DefaultZoomLevel    = 30
+	MaxPreciseZoomLevel = 30
+	MinZoomLevel        = 1
+)
 
 // ZoomLevels are the supported zoom levels (minutes per row).
 // Keep this small and deliberate so zooming lands on useful calendar views.
@@ -79,6 +83,7 @@ type Model struct {
 	width          int
 	height         int
 	statusMsg      string // transient message
+	statusToken    int
 
 	// Zoom
 	zoomLevel int // minutes per row, or ZoomAuto
@@ -134,15 +139,29 @@ type Model struct {
 	yearCursor time.Time // selected date in year view
 
 	// Settings
-	settings           Settings // persistent user preferences
-	settingsCursor     int      // selected option in settings menu
-	settingsEditActive bool
-	settingsEditKey    string
-	settingsEditBuffer string
-	helpCursor         int
-	helpScroll         int
-	helpRebinding      bool
-	helpRebindKey      string
+	settings             Settings // persistent user preferences
+	settingsCursor       int      // selected option in settings menu
+	settingsEditActive   bool
+	settingsEditKey      string
+	settingsEditBuffer   string
+	settingsSearchActive bool
+	settingsSearchQuery  string
+	importReturnMode     Mode
+	importReturnView     ViewMode
+	importPath           string
+	importMatches        []string
+	importSummary        []string
+	exportReturnMode     Mode
+	exportReturnView     ViewMode
+	exportPath           string
+	exportMatches        []string
+	exportSummary        []string
+	helpSearchActive     bool
+	helpSearchQuery      string
+	helpCursor           int
+	helpScroll           int
+	helpRebinding        bool
+	helpRebindKey        string
 
 	// Edit menu state
 	editMenuIndex  int       // event index being edited
@@ -188,6 +207,10 @@ type ClipboardItem struct {
 	Duration    int
 	Recurrence  string
 	StartOffset int
+}
+
+type statusClearMsg struct {
+	token int
 }
 
 // NewModel creates a new model, loading persisted events and settings.
@@ -809,6 +832,15 @@ func (m *Model) saveEvents() {
 	}
 }
 
+func (m *Model) setTimedStatus(msg string, d time.Duration) tea.Cmd {
+	m.statusMsg = msg
+	m.statusToken++
+	token := m.statusToken
+	return tea.Tick(d, func(time.Time) tea.Msg {
+		return statusClearMsg{token: token}
+	})
+}
+
 // pushUndo saves a snapshot of the current events for undo.
 func (m *Model) pushUndo() {
 	const maxUndo = 50
@@ -1121,18 +1153,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case editorResultMsg:
 		return m.handleEditorResult(msg)
 
+	case statusClearMsg:
+		if msg.token == m.statusToken {
+			m.statusMsg = ""
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		// Ctrl+C always quits
 		if msg.String() == "ctrl+c" {
 			m.savePosition()
 			return m, tea.Quit
 		}
-		if IsKey(msg, KeyQuestion) && m.mode != ModeHelp && m.mode != ModeInput && m.mode != ModeInputDesc && m.mode != ModeInputRecurrence && m.mode != ModeSearch && m.mode != ModeGoto && m.mode != ModeGotoDay {
+		if IsKey(msg, KeyQuestion) && m.mode != ModeHelp && m.mode != ModeInput && m.mode != ModeInputDesc && m.mode != ModeInputRecurrence && m.mode != ModeSearch && m.mode != ModeGoto && m.mode != ModeGotoDay && m.mode != ModeImport {
 			m.mode = ModeHelp
 			m.helpCursor = 0
 			m.helpScroll = 0
 			m.helpRebinding = false
 			m.helpRebindKey = ""
+			m.helpSearchActive = false
+			m.helpSearchQuery = ""
 			return m, nil
 		}
 
@@ -1172,6 +1212,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateYear(msg)
 		case ModeSettings:
 			return m.updateSettings(msg)
+		case ModeImport:
+			return m.updateImport(msg)
+		case ModeExport:
+			return m.updateExport(msg)
 		case ModeEditMenu:
 			return m.updateEditMenu(msg)
 		case ModeConfirmRecurDelete:
@@ -2009,6 +2053,8 @@ func (m Model) updateNavigate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Open settings menu
 		m.mode = ModeSettings
 		m.settingsCursor = 0
+		m.settingsSearchActive = false
+		m.settingsSearchQuery = ""
 
 	default:
 		// Number keys 1-9 to set day count
@@ -2888,6 +2934,14 @@ func (m Model) View() string {
 		return m.renderScreenWithStatus(RenderSettings(&m))
 	}
 
+	if m.mode == ModeImport {
+		return m.renderScreenWithStatus(RenderImport(&m))
+	}
+
+	if m.mode == ModeExport {
+		return m.renderScreenWithStatus(RenderExport(&m))
+	}
+
 	// Edit menu is fullscreen
 	if m.mode == ModeEditMenu {
 		return m.renderScreenWithStatus(RenderEditMenu(&m))
@@ -3036,6 +3090,24 @@ func helpRowByKey(keyID string) (helpRow, bool) {
 	return helpRow{}, false
 }
 
+func filteredHelpRows(query string) []helpRow {
+	rows := helpRows()
+	query = strings.ToLower(strings.TrimSpace(query))
+	if query == "" {
+		return rows
+	}
+	filtered := make([]helpRow, 0, len(rows))
+	for _, row := range rows {
+		if strings.Contains(strings.ToLower(row.section), query) ||
+			strings.Contains(strings.ToLower(row.keys), query) ||
+			strings.Contains(strings.ToLower(row.action), query) ||
+			strings.Contains(strings.ToLower(row.note), query) {
+			filtered = append(filtered, row)
+		}
+	}
+	return filtered
+}
+
 func canonicalKeyName(key string) string {
 	if key == "backspace" {
 		return key
@@ -3047,7 +3119,7 @@ func canonicalKeyName(key string) string {
 }
 
 func (m Model) selectedHelpRow() (helpRow, bool) {
-	rows := helpRows()
+	rows := filteredHelpRows(m.helpSearchQuery)
 	if m.helpCursor < 0 || m.helpCursor >= len(rows) {
 		return helpRow{}, false
 	}
@@ -3140,12 +3212,16 @@ func (m Model) helpWindow(rows []helpRow, start int) (int, int) {
 }
 
 func (m Model) renderHelpView() string {
-	rows := helpRows()
+	rows := filteredHelpRows(m.helpSearchQuery)
+	if len(rows) == 0 {
+		m.helpCursor = 0
+		m.helpScroll = 0
+	}
 
-	if m.helpCursor < 0 {
+	if len(rows) > 0 && m.helpCursor < 0 {
 		m.helpCursor = 0
 	}
-	if m.helpCursor >= len(rows) {
+	if len(rows) > 0 && m.helpCursor >= len(rows) {
 		m.helpCursor = len(rows) - 1
 	}
 
@@ -3187,15 +3263,20 @@ func (m Model) renderHelpView() string {
 		Padding(1, 2)
 	footerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(m.uiColor("hint_fg", "245")))
 
-	start, end := m.helpWindow(rows, m.helpScroll)
+	start, end := 0, 0
+	if len(rows) > 0 {
+		start, end = m.helpWindow(rows, m.helpScroll)
+	}
 
 	var body []string
 	body = append(body, titleStyle.Render("Help"))
 	if m.helpRebinding {
 		row, _ := helpRowByKey(m.helpRebindKey)
 		body = append(body, footerStyle.Render(fmt.Sprintf("Rebinding %s - press new key  Backspace: reset  Esc: cancel", row.action)))
+	} else if m.helpSearchActive {
+		body = append(body, footerStyle.Render(fmt.Sprintf("/%s_  Enter: keep filter  Backspace: delete  Ctrl+w: delete word  Esc: clear", m.helpSearchQuery)))
 	} else {
-		body = append(body, footerStyle.Render("j/k: move  Enter: rebind  Backspace: reset  ctrl+d/u: faster scroll  ?: close"))
+		body = append(body, footerStyle.Render("j/k: move  /: search  Enter: rebind  Backspace: reset  ctrl+d/u: faster scroll  ?: close"))
 	}
 	body = append(body, "")
 	lastSection := ""
@@ -3228,6 +3309,9 @@ func (m Model) renderHelpView() string {
 			body = append(body, rowStyle.Render(line))
 		}
 	}
+	if len(rows) == 0 {
+		body = append(body, rowStyle.Render("  No matching keybindings"))
+	}
 
 	if end < len(rows) {
 		body = append(body, "")
@@ -3240,7 +3324,7 @@ func (m Model) renderHelpView() string {
 }
 
 func (m Model) updateHelp(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	rows := helpRows()
+	rows := filteredHelpRows(m.helpSearchQuery)
 	rowCount := len(rows)
 	page := m.height - 12
 	if page < 5 {
@@ -3264,9 +3348,45 @@ func (m Model) updateHelp(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	if m.helpSearchActive {
+		switch msg.String() {
+		case KeyEsc:
+			m.helpSearchActive = false
+			m.helpSearchQuery = ""
+			m.helpCursor = 0
+			m.helpScroll = 0
+			return m, nil
+		case KeyEnter:
+			m.helpSearchActive = false
+			return m, nil
+		case "backspace":
+			if len(m.helpSearchQuery) > 0 {
+				m.helpSearchQuery = m.helpSearchQuery[:len(m.helpSearchQuery)-1]
+			}
+			m.helpCursor = 0
+			m.helpScroll = 0
+			return m, nil
+		case "ctrl+w":
+			m.helpSearchQuery = deletePreviousWord(m.helpSearchQuery)
+			m.helpCursor = 0
+			m.helpScroll = 0
+			return m, nil
+		default:
+			if len(msg.Runes) > 0 {
+				m.helpSearchQuery += string(msg.Runes)
+				m.helpCursor = 0
+				m.helpScroll = 0
+			}
+			return m, nil
+		}
+	}
 	switch {
 	case IsKey(msg, KeyEsc) || IsKey(msg, KeyQ) || IsKey(msg, KeyQuestion):
 		m.mode = ModeNavigate
+		return m, nil
+	case IsKey(msg, KeySlash):
+		m.helpSearchActive = true
+		m.helpSearchQuery = ""
 		return m, nil
 	case msg.String() == "backspace":
 		if row, ok := m.selectedHelpRow(); ok && row.editable {
@@ -3281,19 +3401,31 @@ func (m Model) updateHelp(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	case IsKey(msg, KeyJ):
+		if rowCount == 0 {
+			return m, nil
+		}
 		if m.helpCursor < rowCount-1 {
 			m.helpCursor++
 		}
 	case IsKey(msg, KeyK):
+		if rowCount == 0 {
+			return m, nil
+		}
 		if m.helpCursor > 0 {
 			m.helpCursor--
 		}
 	case IsKey(msg, KeyCtrlD):
+		if rowCount == 0 {
+			return m, nil
+		}
 		m.helpCursor += page / 2
 		if m.helpCursor >= rowCount {
 			m.helpCursor = rowCount - 1
 		}
 	case IsKey(msg, KeyCtrlU):
+		if rowCount == 0 {
+			return m, nil
+		}
 		m.helpCursor -= page / 2
 		if m.helpCursor < 0 {
 			m.helpCursor = 0
@@ -3395,7 +3527,7 @@ func (m Model) renderStatusBar() string {
 		count := len(m.visualSelectedEventIDs())
 		hints = hintStyle.Render(fmt.Sprintf(" %d selected", count))
 	case ModeMonth:
-		mode = StatusMonthModeStyle.Render(" MONTH ")
+		mode = modeStyle.Render(" MONTH ")
 		monthDate := m.monthCursor.Format("January 2006")
 		selectedDay := m.monthCursor.Format("Mon Jan 02")
 		eventCount := m.store.EventCount(m.monthCursor)
@@ -3407,7 +3539,7 @@ func (m Model) renderStatusBar() string {
 			fmt.Sprintf(" %s  %s%s  h/l: day  j/k: week  H/L: month  Enter: open  c: today  Y: year  M: back  q: quit",
 				monthDate, selectedDay, evInfo))
 	case ModeYear:
-		mode = StatusYearModeStyle.Render(" YEAR ")
+		mode = modeStyle.Render(" YEAR ")
 		yearLabel := m.yearCursor.Format("2006")
 		selectedDay := m.yearCursor.Format("Mon Jan 02")
 		eventCount := m.store.EventCount(m.yearCursor)
@@ -3421,6 +3553,12 @@ func (m Model) renderStatusBar() string {
 	case ModeSettings:
 		mode = modeStyle.Render(" SETTINGS ")
 		hints = hintStyle.Render(" settings")
+	case ModeImport:
+		mode = modeStyle.Render(" IMPORT ")
+		hints = hintStyle.Render(" .ics file import")
+	case ModeExport:
+		mode = modeStyle.Render(" EXPORT ")
+		hints = hintStyle.Render(" .ics file export")
 	case ModeEditMenu:
 		mode = modeStyle.Render(" EDIT ")
 		if m.editMenuActive {
@@ -3445,7 +3583,13 @@ func (m Model) renderStatusBar() string {
 
 	bar := mode + hints
 	if m.statusMsg != "" {
-		return statusBarStyle.Render(bar) + "  " + warningStyle.Render(m.statusMsg)
+		base := statusBarStyle.Render(bar)
+		msg := warningStyle.Render(m.statusMsg)
+		gap := m.width - lipgloss.Width(base) - lipgloss.Width(msg)
+		if gap < 2 {
+			gap = 2
+		}
+		return base + statusBarStyle.Render(strings.Repeat(" ", gap)) + msg
 	}
 	return statusBarStyle.Width(m.width).Render(bar)
 }

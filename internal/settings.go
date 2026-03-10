@@ -129,7 +129,82 @@ func settingsItems() []settingsItem {
 				m.saveSettings()
 			},
 		},
+		{
+			label: "Import events",
+			display: func(m *Model) string {
+				return "open"
+			},
+			action: func(m *Model) {
+				m.openImportOverlay()
+			},
+		},
+		{
+			label: "Export events",
+			display: func(m *Model) string {
+				return "open"
+			},
+			action: func(m *Model) {
+				m.openExportOverlay()
+			},
+		},
 	}
+}
+
+func settingsVisibleIndices(items []settingsItem, m *Model, query string) []int {
+	if strings.TrimSpace(query) == "" {
+		indices := make([]int, len(items))
+		for i := range items {
+			indices[i] = i
+		}
+		return indices
+	}
+	query = strings.ToLower(strings.TrimSpace(query))
+	var indices []int
+	for i, item := range items {
+		label := strings.ToLower(item.label)
+		value := strings.ToLower(item.display(m))
+		if strings.Contains(label, query) || strings.Contains(value, query) {
+			indices = append(indices, i)
+		}
+	}
+	return indices
+}
+
+func moveSettingsCursor(m *Model, delta int, items []settingsItem) {
+	visible := settingsVisibleIndices(items, m, m.settingsSearchQuery)
+	if len(visible) == 0 {
+		m.settingsCursor = 0
+		return
+	}
+	pos := 0
+	for i, idx := range visible {
+		if idx == m.settingsCursor {
+			pos = i
+			break
+		}
+	}
+	pos += delta
+	if pos < 0 {
+		pos = 0
+	}
+	if pos >= len(visible) {
+		pos = len(visible) - 1
+	}
+	m.settingsCursor = visible[pos]
+}
+
+func clampSettingsCursorToVisible(m *Model, items []settingsItem) {
+	visible := settingsVisibleIndices(items, m, m.settingsSearchQuery)
+	if len(visible) == 0 {
+		m.settingsCursor = 0
+		return
+	}
+	for _, idx := range visible {
+		if idx == m.settingsCursor {
+			return
+		}
+	}
+	m.settingsCursor = visible[0]
 }
 
 func cycleSettingsZoom(m *Model, dir int) {
@@ -215,18 +290,49 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	switch {
-	case IsKey(msg, KeyJ):
-		m.settingsCursor++
-		if m.settingsCursor >= itemCount {
-			m.settingsCursor = itemCount - 1
+	if m.settingsSearchActive {
+		switch msg.String() {
+		case "esc":
+			m.settingsSearchActive = false
+			m.settingsSearchQuery = ""
+			m.statusMsg = ""
+			clampSettingsCursorToVisible(&m, items)
+			return m, nil
+		case "enter":
+			m.settingsSearchActive = false
+			clampSettingsCursorToVisible(&m, items)
+			return m, nil
+		case "backspace":
+			if len(m.settingsSearchQuery) > 0 {
+				m.settingsSearchQuery = m.settingsSearchQuery[:len(m.settingsSearchQuery)-1]
+			}
+			clampSettingsCursorToVisible(&m, items)
+			return m, nil
+		case "ctrl+w":
+			m.settingsSearchQuery = deletePreviousWord(m.settingsSearchQuery)
+			clampSettingsCursorToVisible(&m, items)
+			return m, nil
+		default:
+			s := msg.String()
+			if len([]rune(s)) == 1 || s == " " {
+				m.settingsSearchQuery += s
+				clampSettingsCursorToVisible(&m, items)
+			}
+			return m, nil
 		}
+	}
+
+	switch {
+	case IsKey(msg, KeySlash):
+		m.settingsSearchActive = true
+		m.settingsSearchQuery = ""
+		return m, nil
+
+	case IsKey(msg, KeyJ):
+		moveSettingsCursor(&m, 1, items)
 
 	case IsKey(msg, KeyK):
-		m.settingsCursor--
-		if m.settingsCursor < 0 {
-			m.settingsCursor = 0
-		}
+		moveSettingsCursor(&m, -1, items)
 
 	case IsKey(msg, KeyH):
 		if m.settingsCursor >= 0 && m.settingsCursor < itemCount {
@@ -348,6 +454,7 @@ func applyAccentColor(m *Model, value string) {
 // RenderSettings renders the fullscreen settings menu.
 func RenderSettings(m *Model) string {
 	items := settingsItems()
+	visible := settingsVisibleIndices(items, m, m.settingsSearchQuery)
 	accent := m.uiColor("accent", "39")
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(accent))
 	valueStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(accent)).Bold(true)
@@ -371,12 +478,13 @@ func RenderSettings(m *Model) string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("Settings"))
 	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("Toggle the small always-visible shortcut hints."))
+	b.WriteString(mutedStyle.Render("Adjust preferences or open event import from here."))
 	b.WriteString("\n\n")
 	b.WriteString(sectionStyle.Render(" Options "))
 	b.WriteString("\n")
 
-	for i, item := range items {
+	for _, i := range visible {
+		item := items[i]
 		cursor := "  "
 		style := itemStyle
 		if i == m.settingsCursor {
@@ -389,19 +497,27 @@ func RenderSettings(m *Model) string {
 		b.WriteString(style.Render(line))
 		b.WriteString("\n")
 	}
+	if len(visible) == 0 {
+		b.WriteString(mutedStyle.Render("  No matching settings"))
+		b.WriteString("\n")
+	}
 
 	b.WriteString("\n")
 	if m.settingsEditActive {
 		b.WriteString(mutedStyle.Render(fmt.Sprintf("Hex color: %s_", m.settingsEditBuffer)))
 		b.WriteString("\n")
 		b.WriteString(mutedStyle.Render("Enter: save  Backspace: delete  Ctrl+r: reset default  Esc: cancel  Example: #1a5fb4"))
+	} else if m.settingsSearchActive {
+		b.WriteString(mutedStyle.Render(fmt.Sprintf("/%s_", m.settingsSearchQuery)))
+		b.WriteString("\n")
+		b.WriteString(mutedStyle.Render("Enter: keep filter  Backspace: delete  Ctrl+w: delete word  Esc: clear"))
 	} else if m.settings.ShowHints {
-		b.WriteString(mutedStyle.Render("Enter on a color row to edit hex directly"))
+		b.WriteString(mutedStyle.Render("Enter on a color row to edit hex directly  /: search settings"))
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
 	if m.settings.ShowHints {
-		b.WriteString(mutedStyle.Render("j/k: navigate  h/l: adjust  Enter/Space: toggle  Esc/q: close"))
+		b.WriteString(mutedStyle.Render("j/k: navigate  h/l: adjust  Enter/Space: toggle or open  /: search  Esc/q: close"))
 	}
 
 	content := lipgloss.NewStyle().Width(contentWidth).Render(b.String())
