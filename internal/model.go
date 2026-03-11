@@ -189,6 +189,16 @@ type Model struct {
 	visualAnchorDate   time.Time
 	visualAnchorMin    int
 	pendingYank        bool
+	jumpBackStack      []navSnapshot
+	jumpForwardStack   []navSnapshot
+}
+
+type navSnapshot struct {
+	windowStart        time.Time
+	cursorCol          int
+	cursorMin          int
+	viewportOffset     int
+	selectedOverlapEvt string
 }
 
 type undoSnapshot struct {
@@ -931,6 +941,73 @@ func (m *Model) savePosition() {
 	m.saveSettings()
 }
 
+func (m *Model) currentNavSnapshot() navSnapshot {
+	return navSnapshot{
+		windowStart:        m.windowStart,
+		cursorCol:          m.cursorCol,
+		cursorMin:          m.cursorMin,
+		viewportOffset:     m.viewportOffset,
+		selectedOverlapEvt: m.selectedOverlapEvt,
+	}
+}
+
+func sameNavSnapshot(a, b navSnapshot) bool {
+	return DateKey(a.windowStart).Equal(DateKey(b.windowStart)) &&
+		a.cursorCol == b.cursorCol &&
+		a.cursorMin == b.cursorMin &&
+		a.viewportOffset == b.viewportOffset &&
+		a.selectedOverlapEvt == b.selectedOverlapEvt
+}
+
+func (m *Model) pushJumpLocation() {
+	const maxJumpHistory = 100
+	current := m.currentNavSnapshot()
+	if n := len(m.jumpBackStack); n > 0 && sameNavSnapshot(m.jumpBackStack[n-1], current) {
+		m.jumpForwardStack = nil
+		return
+	}
+	m.jumpBackStack = append(m.jumpBackStack, current)
+	if len(m.jumpBackStack) > maxJumpHistory {
+		m.jumpBackStack = m.jumpBackStack[len(m.jumpBackStack)-maxJumpHistory:]
+	}
+	m.jumpForwardStack = nil
+}
+
+func (m *Model) restoreNavSnapshot(snap navSnapshot) {
+	m.windowStart = snap.windowStart
+	m.cursorCol = snap.cursorCol
+	m.cursorMin = snap.cursorMin
+	m.viewportOffset = snap.viewportOffset
+	m.selectedOverlapEvt = snap.selectedOverlapEvt
+	m.viewMode = ViewWeek
+	m.mode = ModeNavigate
+	m.ensureCursorVisible()
+}
+
+func (m *Model) jumpBack() bool {
+	if len(m.jumpBackStack) == 0 {
+		return false
+	}
+	current := m.currentNavSnapshot()
+	last := m.jumpBackStack[len(m.jumpBackStack)-1]
+	m.jumpBackStack = m.jumpBackStack[:len(m.jumpBackStack)-1]
+	m.jumpForwardStack = append(m.jumpForwardStack, current)
+	m.restoreNavSnapshot(last)
+	return true
+}
+
+func (m *Model) jumpForward() bool {
+	if len(m.jumpForwardStack) == 0 {
+		return false
+	}
+	current := m.currentNavSnapshot()
+	last := m.jumpForwardStack[len(m.jumpForwardStack)-1]
+	m.jumpForwardStack = m.jumpForwardStack[:len(m.jumpForwardStack)-1]
+	m.jumpBackStack = append(m.jumpBackStack, current)
+	m.restoreNavSnapshot(last)
+	return true
+}
+
 func (m *Model) moveAdjustBy(delta int) {
 	date := m.SelectedDate()
 	if m.adjustRecurring {
@@ -1169,7 +1246,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.savePosition()
 			return m, tea.Quit
 		}
+		if IsKey(msg, KeyCtrlO) && m.mode != ModeInput && m.mode != ModeInputDesc && m.mode != ModeInputRecurrence && m.mode != ModeSearch && m.mode != ModeGoto && m.mode != ModeGotoDay && m.mode != ModeImport && m.mode != ModeExport {
+			if m.jumpBack() {
+				m.statusMsg = "Jumped back"
+			} else {
+				m.statusMsg = "No older jump"
+			}
+			return m, nil
+		}
+		if (IsKey(msg, KeyCtrlI) || (msg.String() == "tab" && len(m.jumpForwardStack) > 0)) && m.mode != ModeInput && m.mode != ModeInputDesc && m.mode != ModeInputRecurrence && m.mode != ModeSearch && m.mode != ModeGoto && m.mode != ModeGotoDay && m.mode != ModeImport && m.mode != ModeExport {
+			if m.jumpForward() {
+				m.statusMsg = "Jumped forward"
+			} else {
+				m.statusMsg = "No newer jump"
+			}
+			return m, nil
+		}
 		if IsKey(msg, KeyQuestion) && m.mode != ModeHelp && m.mode != ModeInput && m.mode != ModeInputDesc && m.mode != ModeInputRecurrence && m.mode != ModeSearch && m.mode != ModeGoto && m.mode != ModeGotoDay && m.mode != ModeImport {
+			m.pushJumpLocation()
 			m.mode = ModeHelp
 			m.helpCursor = 0
 			m.helpScroll = 0
@@ -1527,6 +1621,7 @@ func (m Model) updateNavigate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case IsKey(msg, KeyQuestion):
+		m.pushJumpLocation()
 		m.mode = ModeHelp
 
 	case IsKey(msg, KeyH):
@@ -2033,6 +2128,7 @@ func (m Model) updateNavigate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case IsKey(msg, KeyC):
 		// Jump to now: today on far left, cursor at current time, viewport centered
+		m.pushJumpLocation()
 		now := time.Now()
 		nowMin := now.Hour()*60 + now.Minute()
 		m.windowStart = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
@@ -2043,12 +2139,14 @@ func (m Model) updateNavigate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case IsKey(msg, KeyShiftM):
 		// Toggle to month view
+		m.pushJumpLocation()
 		m.viewMode = ViewMonth
 		m.mode = ModeMonth
 		m.monthCursor = m.SelectedDate()
 
 	case IsKey(msg, KeyShiftY):
 		// Toggle to year view
+		m.pushJumpLocation()
 		m.viewMode = ViewYear
 		m.mode = ModeYear
 		m.yearCursor = m.SelectedDate()
@@ -3041,6 +3139,8 @@ func helpRows() []helpRow {
 		{"Week View", KeyL, DisplayKey(KeyL), "Move right", "week and visual navigation", true},
 		{"Week View", KeyCtrlD, DisplayKey(KeyCtrlD), "Half page down", "week and visual navigation", true},
 		{"Week View", KeyCtrlU, DisplayKey(KeyCtrlU), "Half page up", "week and visual navigation", true},
+		{"Week View", KeyCtrlO, DisplayKey(KeyCtrlO), "Jump back", "jump to older location", true},
+		{"Week View", KeyCtrlI, DisplayKey(KeyCtrlI), "Jump forward", "jump to newer location (often Tab)", true},
 		{"Week View", KeyShiftJ, DisplayKey(KeyShiftJ), "Step minute down", "also expands create/visual", true},
 		{"Week View", KeyShiftK, DisplayKey(KeyShiftK), "Step minute up", "also expands create/visual", true},
 		{"Week View", KeyShiftH, DisplayKey(KeyShiftH), "Prev overlap", "previous overlapping event", true},
@@ -3467,7 +3567,7 @@ func (m Model) renderStatusBar() string {
 	warningStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(warningFG))
 	statusBarStyle := lipgloss.NewStyle().Background(lipgloss.Color(statusBG)).Foreground(lipgloss.Color(statusFG)).Padding(0, 1)
 
-	var mode, hints string
+	var mode, hintText string
 
 	switch m.mode {
 	case ModeNavigate:
@@ -3498,38 +3598,38 @@ func (m Model) renderStatusBar() string {
 		if m.settings.ShowHints {
 			info += fmt.Sprintf("  %s: settings  %s: help", DisplayKey(KeyShiftS), DisplayKey(KeyQuestion))
 		}
-		hints = hintStyle.Render(info)
+		hintText = info
 	case ModeCreate:
 		mode = modeStyle.Render(" CREATE ")
-		hints = hintStyle.Render(fmt.Sprintf(" %s  %s", date, formatCreateTimeRange(m.createStart, m.createEnd)))
+		hintText = fmt.Sprintf(" %s  %s", date, formatCreateTimeRange(m.createStart, m.createEnd))
 	case ModeInput:
 		mode = modeStyle.Render(" CREATE ")
-		hints = hintStyle.Render(" Type title")
+		hintText = " Type title"
 	case ModeInputDesc:
 		mode = modeStyle.Render(" CREATE ")
-		hints = hintStyle.Render(fmt.Sprintf(" %q", m.inputBuffer))
+		hintText = fmt.Sprintf(" %q", m.inputBuffer)
 	case ModeInputRecurrence:
 		mode = modeStyle.Render(" CREATE ")
-		hints = hintStyle.Render(fmt.Sprintf(" %q  Repeat: %s", m.inputBuffer, RecurrenceLabel(m.createRecurrence)))
+		hintText = fmt.Sprintf(" %q  Repeat: %s", m.inputBuffer, RecurrenceLabel(m.createRecurrence))
 	case ModeAdjust:
 		mode = modeStyle.Render(" MOVE ")
-		hints = hintStyle.Render(fmt.Sprintf(" %s  %s", date, cursorTime))
+		hintText = fmt.Sprintf(" %s  %s", date, cursorTime)
 	case ModeDetail:
 		mode = StatusDetailModeStyle.Render(" DETAIL ")
-		hints = hintStyle.Render(" e: edit  Esc/q: back")
+		hintText = " e: edit  Esc/q: back"
 	case ModeGoto:
 		mode = modeStyle.Render(" GOTO TIME ")
-		hints = hintStyle.Render(" Type time (12, 1200, 12:00), Enter: go, Esc: cancel")
+		hintText = " Type time (12, 1200, 12:00), Enter: go, Esc: cancel"
 	case ModeGotoDay:
 		mode = modeStyle.Render(" GOTO DAY ")
-		hints = hintStyle.Render(" Type day of month (1-31), Enter: go, Esc: cancel")
+		hintText = " Type day of month (1-31), Enter: go, Esc: cancel"
 	case ModeSearch:
 		mode = modeStyle.Render(" SEARCH ")
-		hints = hintStyle.Render(fmt.Sprintf(" %d matches", len(m.searchMatches)))
+		hintText = fmt.Sprintf(" %d matches", len(m.searchMatches))
 	case ModeVisual:
 		mode = modeStyle.Render(" VISUAL ")
 		count := len(m.visualSelectedEventIDs())
-		hints = hintStyle.Render(fmt.Sprintf(" %d selected", count))
+		hintText = fmt.Sprintf(" %d selected", count)
 	case ModeMonth:
 		mode = modeStyle.Render(" MONTH ")
 		monthDate := m.monthCursor.Format("January 2006")
@@ -3539,9 +3639,8 @@ func (m Model) renderStatusBar() string {
 		if eventCount > 0 {
 			evInfo = fmt.Sprintf("  %d events", eventCount)
 		}
-		hints = hintStyle.Render(
-			fmt.Sprintf(" %s  %s%s  h/l: day  j/k: week  H/L: month  Enter: open  c: today  Y: year  M: back  q: quit",
-				monthDate, selectedDay, evInfo))
+		hintText = fmt.Sprintf(" %s  %s%s  h/l: day  j/k: week  H/L: month  Enter: open  c: today  Y: year  M: back  q: quit",
+			monthDate, selectedDay, evInfo)
 	case ModeYear:
 		mode = modeStyle.Render(" YEAR ")
 		yearLabel := m.yearCursor.Format("2006")
@@ -3551,47 +3650,74 @@ func (m Model) renderStatusBar() string {
 		if eventCount > 0 {
 			evInfo = fmt.Sprintf("  %d events", eventCount)
 		}
-		hints = hintStyle.Render(
-			fmt.Sprintf(" %s  %s%s  h/l: day  j/k: week  H/L: month  J/K: year  Enter: open  c: today  M: month  Y/Esc: back  q: quit",
-				yearLabel, selectedDay, evInfo))
+		hintText = fmt.Sprintf(" %s  %s%s  h/l: day  j/k: week  H/L: month  J/K: year  Enter: open  c: today  M: month  Y/Esc: back  q: quit",
+			yearLabel, selectedDay, evInfo)
 	case ModeSettings:
 		mode = modeStyle.Render(" SETTINGS ")
-		hints = hintStyle.Render(" settings")
+		hintText = " settings"
 	case ModeImport:
 		mode = modeStyle.Render(" IMPORT ")
-		hints = hintStyle.Render(" .ics file import")
+		hintText = " .ics file import"
 	case ModeExport:
 		mode = modeStyle.Render(" EXPORT ")
-		hints = hintStyle.Render(" .ics file export")
+		hintText = " .ics file export"
 	case ModeEditMenu:
 		mode = modeStyle.Render(" EDIT ")
 		if m.editMenuActive {
-			hints = hintStyle.Render(" editing")
+			hintText = " editing"
 		} else {
-			hints = hintStyle.Render(" fields")
+			hintText = " fields"
 		}
 	case ModeHelp:
 		mode = modeStyle.Render(" HELP ")
-		hints = hintStyle.Render(" keybindings")
+		hintText = " keybindings"
 	case ModeConfirmRecurDelete:
 		mode = warningStyle.Render(" DELETE ")
-		hints = hintStyle.Render(" (o): delete this occurrence  (a): delete all  Esc: cancel")
+		hintText = " (o): delete this occurrence  (a): delete all  Esc: cancel"
 	case ModeConfirmRecurMove:
 		mode = modeStyle.Render(" MOVE ")
 		if m.confirmVisualRecurring {
-			hints = hintStyle.Render(" (o): move selected occurrences  (a): move whole series  Esc: cancel")
+			hintText = " (o): move selected occurrences  (a): move whole series  Esc: cancel"
 		} else {
-			hints = hintStyle.Render(" (o): move this occurrence  (a): move all  Esc: cancel")
+			hintText = " (o): move this occurrence  (a): move all  Esc: cancel"
 		}
 	}
 
+	hints := ""
+	available := m.width - lipgloss.Width(mode) - 2
+	if available < 0 {
+		available = 0
+	}
+	if hintText != "" {
+		hints = hintStyle.Render(padRight(truncLabel(hintText, available), available))
+	}
 	bar := mode + hints
 	if m.statusMsg != "" {
-		base := statusBarStyle.Render(bar)
-		msg := warningStyle.Render(m.statusMsg)
+		msgMax := m.width / 3
+		if msgMax < 12 {
+			msgMax = 12
+		}
+		if msgMax > m.width-4 {
+			msgMax = m.width - 4
+		}
+		if msgMax < 0 {
+			msgMax = 0
+		}
+		msg := warningStyle.Render(truncLabel(m.statusMsg, msgMax))
+		baseMax := m.width - lipgloss.Width(msg)
+		if baseMax < 0 {
+			baseMax = 0
+		}
+		base := statusBarStyle.Width(baseMax).Render(bar)
 		gap := m.width - lipgloss.Width(base) - lipgloss.Width(msg)
 		if gap < 2 {
 			gap = 2
+		}
+		if lipgloss.Width(base)+gap+lipgloss.Width(msg) > m.width {
+			gap = m.width - lipgloss.Width(base) - lipgloss.Width(msg)
+			if gap < 0 {
+				gap = 0
+			}
 		}
 		return base + statusBarStyle.Render(strings.Repeat(" ", gap)) + msg
 	}

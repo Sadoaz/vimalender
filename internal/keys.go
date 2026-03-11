@@ -47,6 +47,8 @@ const (
 	KeyCtrlU    = "ctrl+u" // half page up
 	KeyCtrlP    = "ctrl+p" // previous search match
 	KeyCtrlN    = "ctrl+n" // next search match
+	KeyCtrlO    = "ctrl+o" // jump backward
+	KeyCtrlI    = "ctrl+i" // jump forward
 	KeyCtrlR    = "ctrl+r" // redo
 	KeyQuestion = "?"
 )
@@ -60,9 +62,11 @@ func DefaultKeybindings() map[string]string {
 		KeyC,
 		KeyCtrlD,
 		KeyCtrlN,
+		KeyCtrlO,
 		KeyCtrlP,
 		KeyCtrlR,
 		KeyCtrlU,
+		KeyCtrlI,
 		KeyD,
 		KeyE,
 		KeyEnter,

@@ -30,6 +30,7 @@ func (m Model) updateGoto(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				delta := min - m.cursorMin
 				m.moveAdjustBy(delta)
 			} else {
+				m.pushJumpLocation()
 				m.cursorMin = min
 				m.ensureCursorVisible()
 			}
@@ -90,6 +91,7 @@ func (m Model) updateGotoDay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				deltaDays := int(DateKey(target).Sub(DateKey(cur)).Hours() / 24)
 				m.moveAdjustBy(deltaDays * MinutesPerDay)
 			} else {
+				m.pushJumpLocation()
 				m.windowStart = target
 				m.cursorCol = 0
 				m.resetOverlapIndex()
@@ -129,6 +131,7 @@ func (m Model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = ModeNavigate
 		if len(m.searchMatches) > 0 {
 			m.searchActive = true
+			m.pushJumpLocation()
 			m.jumpToMatch(0)
 		} else {
 			m.statusMsg = "No matches"
@@ -208,6 +211,7 @@ func (m *Model) nextMatch() {
 	if len(m.searchMatches) == 0 {
 		return
 	}
+	m.pushJumpLocation()
 	m.jumpToMatch((m.searchIndex + 1) % len(m.searchMatches))
 }
 
@@ -220,5 +224,6 @@ func (m *Model) prevMatch() {
 	if idx < 0 {
 		idx = len(m.searchMatches) - 1
 	}
+	m.pushJumpLocation()
 	m.jumpToMatch(idx)
 }
