@@ -502,12 +502,16 @@ func (m *Model) visualClipboardItems() []ClipboardItem {
 		}
 		start.Date = DateKey(ev.Date)
 		start.StartMin = ev.StartMin
+		recurrence := start.Recurrence
+		if ev.IsRecurring() {
+			recurrence = RecurNone
+		}
 		items = append(items, ClipboardItem{
 			Title:       start.Title,
 			Desc:        start.Desc,
 			Notes:       start.Notes,
 			Duration:    duration,
-			Recurrence:  start.Recurrence,
+			Recurrence:  recurrence,
 			StartOffset: int(DateKey(start.Date).Sub(anchorDate).Hours()/24)*MinutesPerDay + (start.StartMin - anchorMin),
 		})
 	}
