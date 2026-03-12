@@ -52,6 +52,67 @@ go install .
 
 If you usually run the installed binary from `~/go/bin`, remember to run `go install .` after local changes.
 
+## CLI Subcommands
+
+Alongside the TUI, vimalender provides non-interactive subcommands for scripting and automation. Running `vimalender` with no arguments still launches the TUI.
+
+### List events
+
+```sh
+# Today's events
+vimalender list
+
+# Specific date
+vimalender list --date 2025-03-15
+
+# Date range
+vimalender list --from 2025-03-10 --to 2025-03-16
+
+# Machine-readable output (NDJSON)
+vimalender list --json
+```
+
+### Search events
+
+```sh
+vimalender search "standup"
+vimalender search --json "meeting"
+```
+
+### Add an event
+
+```sh
+vimalender add --title "Standup" --date 2025-03-15 --start 9:00 --end 9:30
+vimalender add --title "Sync" --date 2025-03-15 --start 14 --end 1430 --recurrence weekly
+vimalender add --title "Offsite" --date 2025-03-15 --start 9:00 --end 17:00 --desc "All-hands offsite"
+```
+
+Prints the new event ID to stdout.
+
+### Delete an event
+
+```sh
+vimalender delete <event-id>
+```
+
+Prints the deleted ID to stdout. Use `list --json | jq` to find IDs.
+
+### Import `.ics`
+
+```sh
+vimalender import ~/calendar.ics
+```
+
+Prints imported/skipped counts. Skipped events are reported to stderr.
+
+### Export `.ics`
+
+```sh
+vimalender export ~/backup.ics
+```
+
+Appends `.ics` if the path has no extension.
+
 ## Highlights
 
 - Week, month, and year views

@@ -159,28 +159,36 @@ func (m Model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // events are not expanded, so each recurring event appears as a single match
 // on its original date.
 func (m *Model) updateSearchMatches() {
-	m.searchMatches = nil
-	if m.searchQuery == "" {
-		return
-	}
-	query := strings.ToLower(m.searchQuery)
+	m.searchMatches = SearchEvents(m.store, m.searchQuery)
+}
 
-	for date, events := range m.store.AllEvents() {
+// SearchEvents finds all stored events matching query (case-insensitive) in
+// title or description. Returns matches sorted by date then index for
+// deterministic navigation order. This is a pure function over the store and
+// query string so it can be tested without a full Model.
+func SearchEvents(store *EventStore, query string) []SearchMatch {
+	if query == "" {
+		return nil
+	}
+	q := strings.ToLower(query)
+	var matches []SearchMatch
+
+	for date, events := range store.AllEvents() {
 		for i, ev := range events {
-			if strings.Contains(strings.ToLower(ev.Title), query) ||
-				strings.Contains(strings.ToLower(ev.Desc), query) {
-				m.searchMatches = append(m.searchMatches, SearchMatch{Date: date, Index: i, EventID: ev.ID})
+			if strings.Contains(strings.ToLower(ev.Title), q) ||
+				strings.Contains(strings.ToLower(ev.Desc), q) {
+				matches = append(matches, SearchMatch{Date: date, Index: i, EventID: ev.ID})
 			}
 		}
 	}
 
-	// Sort matches by date then index for deterministic navigation order
-	sort.Slice(m.searchMatches, func(i, j int) bool {
-		if m.searchMatches[i].Date.Equal(m.searchMatches[j].Date) {
-			return m.searchMatches[i].Index < m.searchMatches[j].Index
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].Date.Equal(matches[j].Date) {
+			return matches[i].Index < matches[j].Index
 		}
-		return m.searchMatches[i].Date.Before(m.searchMatches[j].Date)
+		return matches[i].Date.Before(matches[j].Date)
 	})
+	return matches
 }
 
 // jumpToMatch navigates to the search match at the given index.
